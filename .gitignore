@@ -1,0 +1,8 @@
+build/
+build32/
+test_scene/build*/
+dist/
+packaging/gestures/
+packaging/gestures_preview.png
+*.user
+.vs/

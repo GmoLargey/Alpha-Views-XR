@@ -1,0 +1,74 @@
+ALPHA VIEWS XR  v1.4.2  by GmoLargey
+https://github.com/GmoLargey
+If you want to support me: https://ko-fi.com/virtuallyreal
+Free, open-source software (GNU GPL version 3).
+See your real hands, steering wheel and flight controls inside PC VR games with
+added depth support, using your headset's passthrough camera.
+
+NEW IN THIS VERSION
+- Now open source: Alpha Views XR is released under the GNU General Public
+  License version 3 (GPL-3.0). The source code is published alongside the
+  installer and zip (AlphaViewsXR-<version>-source.zip). See LICENSE.txt.
+- Clearer edit handles: smooth discs with a symbol for what each one does
+  (move arrows, resize arrow, corner curve, box, pencil) instead of plain
+  coloured dots.
+- Circle windows: tap the teal ring button above a window to switch between
+  rectangle and circle. Circles can still be moved, resized (to an oval), and
+  made boxes or keep boxes.
+- Rounding a corner is now just a drag (no more tap to select corners).
+- Move the guide panel: grab it in edit mode and put it where you like.
+- Move all windows together: hold the "Hold to move all windows" button on the
+  guide panel and move your hand; every window follows, locked together.
+- Presets 1-3 per game: hold a preset button on the guide panel to save your
+  windows, tap it to put them back (or Ctrl+Alt+Shift+1-3 to save, Ctrl+Alt+1-3
+  to load). Quick recovery if a window gets moved.
+- The green box handle now sits just outside the window, so it no longer covers
+  the outline of free shapes.
+- Test scene: the cube is now just below eye level and within reach, to test
+  hands behind objects. Recentring (or R) puts it back in front of you.
+- Free-shape windows: tap the purple button above a window to turn it into a
+  shape, then drag, add or remove its points, or draw the outline by hand.
+  Shapes can be boxes too.
+- Boxes and keep boxes need the game's depth: objects inside a box are only
+  cut out if the game sends depth. Without it the box shows as a plain cube of
+  passthrough.
+- Keep boxes: tap the solid box button beside the green depth handle. The box
+  shows your room, but whatever the game draws inside it (e.g. a character) stays.
+- Key colours: cutouts can be painted green, blue or pink, so a streamer or
+  runtime with colour-key passthrough (e.g. Virtual Desktop) shows your room
+  there. Boxes still use the game's depth. Switch with a V sign (edit mode), a
+  thumbstick press (edit mode) or Ctrl+Alt+C.
+- Controller laser for headsets without eye tracking (e.g. Quest 3): point and
+  pull the trigger to grab from a distance; holding a window, the thumbstick
+  pushes it away or pulls it closer.
+- The thumbstick is read differently, so box depth should now work on Virtual
+  Desktop (VDXR).
+- Virtual Desktop hand tracking: see README for the setting it needs.
+- Hands behind game objects, on by default (Ctrl+Alt+O turns it off): game
+  surfaces closer than your hand cover it, using the game's depth.
+- SteamVR streamed by Virtual Desktop: uses the same cutout colour as Virtual
+  Desktop's own runtime, so cutouts show on both.
+- Steadier hand pinch: the grab point no longer moves while your fingers close,
+  and small movements don't start a drag.
+- Edit mode now works on runtimes without alpha passthrough.
+- Clearer depth status: tells you when a game (e.g. UEVR with Enable Depth
+  off) makes depth but doesn't send it.
+
+BEFORE YOU START
+- Windows 10/11 (64-bit), and a headset with passthrough streaming PC VR.
+- Check the right OpenXR runtime is selected (the one for your streamer).
+  SteamVR-Settings.png in the install folder shows where to check it.
+- Passthrough: if your streamer or PC runtime has an alpha channel
+  (transparency), turn it on. If not, use its colour-key passthrough and pick
+  the same colour here (Ctrl+Alt+C).
+- Games must run in OpenXR mode with Direct3D 11 (Direct3D 12 is experimental,
+  Ctrl+Alt+D, see README). SteamVR-only games don't work, because SteamVR
+  removes the transparency.
+- No eye tracking? Touch the handles directly with your hand or controller.
+
+AFTER INSTALLING
+Try the test scene first (Start menu: "Alpha Views XR test scene").
+Gestures.png, Controllers.png, Keyboard.png and Shapes.png in the install folder
+show all the controls. Full guide and troubleshooting: README.txt.
+
+A zip version (no installer) is also available separately.

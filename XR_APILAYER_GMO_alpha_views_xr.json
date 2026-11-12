@@ -1,0 +1,11 @@
+{
+    "file_format_version": "1.0.0",
+    "api_layer": {
+        "name": "XR_APILAYER_GMO_alpha_views_xr",
+        "library_path": ".\\XR_APILAYER_GMO_alpha_views_xr.dll",
+        "api_version": "1.0",
+        "implementation_version": "1",
+        "description": "Alpha Views XR",
+        "disable_environment": "DISABLE_XR_APILAYER_GMO_alpha_views_xr"
+    }
+}
