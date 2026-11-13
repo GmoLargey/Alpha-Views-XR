@@ -1,7 +1,7 @@
 ALPHA VIEWS XR - LICENCE
 
 Copyright (C) 2026 GmoLargey
-https://github.com/GmoLargey
+https://github.com/GmoLargey/Alpha-Views-XR
 
 Alpha Views XR is free software: you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the Free
@@ -12,9 +12,9 @@ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
 FOR A PARTICULAR PURPOSE. See the GNU General Public License below for more
 details.
 
-The source code is available at https://github.com/GmoLargey and in the
-source package (AlphaViewsXR-<version>-source.zip) published with each
-release.
+The source code is available at https://github.com/GmoLargey/Alpha-Views-XR
+and in the source package (AlphaViewsXR-<version>-source.zip) published with
+each release.
 
 The test scene also includes the Khronos OpenXR loader (Apache-2.0) and
 JsonCpp (MIT), which keep their own licences: see THIRD_PARTY_NOTICES.txt.

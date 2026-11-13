@@ -1,5 +1,5 @@
 ALPHA VIEWS XR  v1.4.4  by GmoLargey
-https://github.com/GmoLargey
+https://github.com/GmoLargey/Alpha-Views-XR
 If you want to support me: https://ko-fi.com/virtuallyreal
 Free, open-source software (GNU GPL version 3).
 See your real hands, steering wheel and flight controls inside PC VR games with

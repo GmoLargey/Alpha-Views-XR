@@ -11,8 +11,8 @@ AppName=Alpha Views XR
 AppVersion={#AppVer}
 AppVerName=Alpha Views XR {#AppVer}
 AppPublisher=GmoLargey
-AppPublisherURL=https://github.com/GmoLargey
-AppSupportURL=https://github.com/GmoLargey
+AppPublisherURL=https://github.com/GmoLargey/Alpha-Views-XR
+AppSupportURL=https://github.com/GmoLargey/Alpha-Views-XR
 AppCopyright=Copyright (C) 2026 GmoLargey. GNU GPL v3.
 VersionInfoVersion={#AppVer}
 VersionInfoCompany=GmoLargey
@@ -217,7 +217,7 @@ begin
     'colour in Alpha Views XR (Ctrl+Alt+C). See README.txt.' + #13#10#13#10 +
     'The gesture, controller, keyboard and shapes pictures are saved in the install folder ' +
     '(Gestures.png, Controllers.png, Keyboard.png, Shapes.png) and in the Start menu.' + #13#10#13#10 +
-    'Alpha Views XR by GmoLargey - https://github.com/GmoLargey' + #13#10 +
+    'Alpha Views XR by GmoLargey - https://github.com/GmoLargey/Alpha-Views-XR' + #13#10 +
     'If you want to support me: https://ko-fi.com/virtuallyreal';
 
 end;

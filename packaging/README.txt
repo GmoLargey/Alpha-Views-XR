@@ -1,5 +1,5 @@
 ALPHA VIEWS XR  v1.4.4
-by GmoLargey  -  https://github.com/GmoLargey
+by GmoLargey  -  https://github.com/GmoLargey/Alpha-Views-XR
 If you want to support me: https://ko-fi.com/virtuallyreal
 Free, open-source software under the GNU GPL version 3 (see LICENCE at the end).
 
@@ -296,9 +296,10 @@ streaming or recording), share it, and change it. If you share a changed
 version, or the program itself, you must also make its source code available
 under the same licence. Full terms: LICENSE.txt.
 
-Source code: https://github.com/GmoLargey, and AlphaViewsXR-<version>-source.zip
-published with each release. The test scene includes the OpenXR loader and
-JsonCpp under their own licences: THIRD_PARTY_NOTICES.txt.
+Source code: https://github.com/GmoLargey/Alpha-Views-XR, and
+AlphaViewsXR-<version>-source.zip published with each release. The test scene
+includes the OpenXR loader and JsonCpp under their own licences:
+THIRD_PARTY_NOTICES.txt.
 
 It comes with NO WARRANTY: use it at your own risk.
 - It can fail or show the wrong area at any time (for example if tracking is
@@ -309,5 +310,5 @@ It comes with NO WARRANTY: use it at your own risk.
   Check that the games and services you use allow it.
 
 
-Copyright (C) 2026 GmoLargey  -  https://github.com/GmoLargey
+Copyright (C) 2026 GmoLargey  -  https://github.com/GmoLargey/Alpha-Views-XR
 If you want to support me: https://ko-fi.com/virtuallyreal

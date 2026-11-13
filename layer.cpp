@@ -2,7 +2,7 @@
 // Copyright (C) 2026 GmoLargey. Alpha Views XR is free software under the GNU General Public
 // License version 3; see LICENSE.txt. It comes with ABSOLUTELY NO WARRANTY.
 //
-// Alpha Views XR - OpenXR API layer by GmoLargey (https://github.com/GmoLargey).
+// Alpha Views XR - OpenXR API layer by GmoLargey (https://github.com/GmoLargey/Alpha-Views-XR).
 //
 // Makes parts of the game's image transparent (alpha 0) and asks the runtime for
 // ALPHA_BLEND, so the headset's passthrough shows the real world there:

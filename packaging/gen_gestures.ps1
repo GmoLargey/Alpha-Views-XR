@@ -506,7 +506,7 @@ foreach ($px in 80, 100, 120, 160) {
 
 # The "How to use" pages. Each list feeds both an installer page and a picture for the install
 # folder / zip: Gestures.png (hands), Controllers.png, Keyboard.png.
-$credit = 'Alpha Views XR by GmoLargey  -  github.com/GmoLargey'
+$credit = 'Alpha Views XR by GmoLargey  -  github.com/GmoLargey/Alpha-Views-XR'
 $tip = 'If you want to support me: ko-fi.com/virtuallyreal'
 $tipPages = @(
     @{

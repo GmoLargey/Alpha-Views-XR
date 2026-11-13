@@ -19,7 +19,7 @@ BEGIN
             VALUE "FileVersion", LAYER_VERSION
             VALUE "InternalName", "XR_APILAYER_GMO_alpha_views_xr"
             VALUE "LegalCopyright", "Copyright (C) 2026 GmoLargey. GNU GPL v3."
-            VALUE "Comments", "Free software under the GNU GPL version 3. Source: https://github.com/GmoLargey"
+            VALUE "Comments", "Free software under the GNU GPL version 3. Source: https://github.com/GmoLargey/Alpha-Views-XR"
             VALUE "OriginalFilename", "XR_APILAYER_GMO_alpha_views_xr.dll"
             VALUE "ProductName", "Alpha Views XR"
             VALUE "ProductVersion", LAYER_VERSION

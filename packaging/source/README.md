@@ -9,7 +9,7 @@ Desktop). With games that share their depth, windows become 3D boxes and your ha
 game objects correctly. Everything is set up in the headset with hand tracking, controllers or
 the keyboard.
 
-[Download](../../releases) · [User guide](packaging/README.txt) · [Building from source](#building-from-source) · [Support me on Ko-fi](https://ko-fi.com/virtuallyreal)
+[Download](https://github.com/GmoLargey/Alpha-Views-XR/releases) · [User guide](packaging/README.txt) · [Building from source](#building-from-source) · [Support me on Ko-fi](https://ko-fi.com/virtuallyreal)
 
 ---
 
@@ -56,7 +56,7 @@ the keyboard.
 
 ## Getting started
 
-1. Download `AlphaViewsXR-Setup-<version>.exe` from [Releases](../../releases) and run it.
+1. Download `AlphaViewsXR-Setup-<version>.exe` from [Releases](https://github.com/GmoLargey/Alpha-Views-XR/releases) and run it.
    (Or extract the zip somewhere permanent and run `Install.bat`.)
 2. Check the right OpenXR runtime is selected, and that Alpha Views XR is **On** under
    *Manage OpenXR API Layers* (SteamVR Settings > OpenXR shows both).
@@ -129,5 +129,5 @@ supported by any of them.
 ## Support
 
 If Alpha Views XR is useful to you, you can support me on
-[Ko-fi](https://ko-fi.com/virtuallyreal). Bug reports are welcome in [Issues](../../issues):
+[Ko-fi](https://ko-fi.com/virtuallyreal). Bug reports are welcome in [Issues](https://github.com/GmoLargey/Alpha-Views-XR/issues):
 please attach `%LOCALAPPDATA%\AlphaViewsXR\log.txt` from the game that had the problem.
