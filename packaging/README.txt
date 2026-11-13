@@ -1,4 +1,4 @@
-ALPHA VIEWS XR  v1.4.3
+ALPHA VIEWS XR  v1.4.4
 by GmoLargey  -  https://github.com/GmoLargey
 If you want to support me: https://ko-fi.com/virtuallyreal
 Free, open-source software under the GNU GPL version 3 (see LICENCE at the end).
@@ -273,7 +273,7 @@ log.txt (see FILES) says what happened in the last game.
 =============================================================================
 INSTALL, FILES, UNINSTALL
 =============================================================================
-Install: run AlphaViewsXR-Setup-1.4.3.exe (asks for admin), or for the zip,
+Install: run AlphaViewsXR-Setup-1.4.4.exe (asks for admin), or for the zip,
 extract it somewhere permanent and double-click Install.bat.
 
 Files, in %LOCALAPPDATA%\AlphaViewsXR:

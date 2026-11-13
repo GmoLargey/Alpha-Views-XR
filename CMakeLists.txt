@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 # The version: package.ps1, the installer, README and the DLL all take it from here.
-project(AlphaViewsXR VERSION 1.4.3 LANGUAGES CXX RC)
+project(AlphaViewsXR VERSION 1.4.4 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
 

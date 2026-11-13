@@ -235,7 +235,14 @@ static XMVECTOR WinToWorld(const Window& w, float x, float y, float z = 0) {
 // other handle is, so it stays put however deep the box gets). Far enough out to keep clear of the corner
 // handles, even on a short window.
 static const float kDepthOut = 0.075f;
-static XMVECTOR DepthHandle(const Window& w) { return WinToWorld(w, w.hw + kDepthOut, 0, 0); }
+// Edit-mode handles grow with distance (FarScale, up to 3x), so far windows' handles stay visible. The
+// handles beside and above a window spread out by the same factor, or on a far window the bigger
+// discs would crowd together and overlap. Spread: that factor at the window's right / top edge.
+static float FarScale(XMVECTOR p);
+static float SpreadSide(const Window& w) { return FarScale(WinToWorld(w, w.hw, 0, 0)); }
+static float SpreadTop(const Window& w) { return FarScale(WinToWorld(w, 0, w.hh, 0)); }
+static float DepthOut(const Window& w) { return kDepthOut * SpreadSide(w); }
+static XMVECTOR DepthHandle(const Window& w) { return WinToWorld(w, w.hw + DepthOut(w), 0, 0); }
 static XMFLOAT3 WorldToWin(const Window& w, XMVECTOR p) {
     XMFLOAT3 r; XMStoreFloat3(&r, XMVector3TransformCoord(p, XMMatrixInverse(nullptr, WinMatrix(w))));
     return r;
@@ -669,8 +676,9 @@ static XMFLOAT3 g_gazeOrigin{}, g_gazeDir{};
 static GazeTarget g_gazeTarget;
 static bool g_gazeLogged = false;
 static XMVECTOR g_head = XMVectorZero();
-// Edit-mode markers grow with distance past 80 cm (up to 3x), so far windows' handles stay visible.
-static float FarScale(XMVECTOR p) { return std::clamp(XMVectorGetX(XMVector3Length(p - g_head)) / 0.8f, 1.0f, 3.0f); }
+// Edit-mode markers grow with distance past 80 cm, so they look the same size out to 8 m (10x; was 3x,
+// i.e. 2.4 m, before boxes could be big): far windows' handles stay easy to see and aim at.
+static float FarScale(XMVECTOR p) { return std::clamp(XMVectorGetX(XMVector3Length(p - g_head)) / 0.8f, 1.0f, 10.0f); }
 static Actions g_act;
 static const int kMaxWindows = 32;    // per game: plenty, and guards against a damaged file loading thousands
 static double g_windowsFullUntil = 0; // tried to make one too many: say so on the guide panel until then
@@ -1433,13 +1441,15 @@ static XMMATRIX HandGrabMatrix(const HandState& h) {
 static const float kPointR = 0.011f, kPointHit = 0.03f, kMidR = 0.0065f, kMidHit = 0.02f;
 static const float kButtonR = 0.013f, kButtonHit = 0.03f;
 // Buttons above the window, left to right: lock, type, draw (free shapes) or circle (rectangles), snap.
-static XMFLOAT2 LockButtonLocal(const Window& w) { return { -0.09f, w.hh + 0.045f }; }
-static XMFLOAT2 TypeButtonLocal(const Window& w) { return { -0.03f, w.hh + 0.045f }; }
-static XMFLOAT2 DrawButtonLocal(const Window& w) { return { 0.03f, w.hh + 0.045f }; }
-static XMFLOAT2 CircleButtonLocal(const Window& w) { return { 0.03f, w.hh + 0.045f }; }
-static XMFLOAT2 SnapButtonLocal(const Window& w) { return { 0.09f, w.hh + 0.045f }; }
+// 6 cm apart and 4.5 cm above the window up close; spread further on far windows (SpreadTop).
+static XMFLOAT2 TopButton(const Window& w, float x) { float s = SpreadTop(w); return { x * s, w.hh + 0.045f * s }; }
+static XMFLOAT2 LockButtonLocal(const Window& w) { return TopButton(w, -0.09f); }
+static XMFLOAT2 TypeButtonLocal(const Window& w) { return TopButton(w, -0.03f); }
+static XMFLOAT2 DrawButtonLocal(const Window& w) { return TopButton(w, 0.03f); }
+static XMFLOAT2 CircleButtonLocal(const Window& w) { return TopButton(w, 0.03f); }
+static XMFLOAT2 SnapButtonLocal(const Window& w) { return TopButton(w, 0.09f); }
 // Keep-box button (solid box): just outside the depth handle, on the centre line too.
-static XMVECTOR KeepButton(const Window& w) { return WinToWorld(w, w.hw + kDepthOut + 0.042f, 0, 0); }
+static XMVECTOR KeepButton(const Window& w) { return WinToWorld(w, w.hw + (kDepthOut + 0.042f) * SpreadSide(w), 0, 0); }
 static XMFLOAT2 MidLocal(const Window& w, int k) {
     const XMFLOAT2 &a = w.pts[k], &b = w.pts[(k + 1) % w.pts.size()];
     return { (a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f };
@@ -1512,12 +1522,14 @@ static GazeTarget RayTarget(XMVECTOR o, XMVECTOR d, float maxDeg, float* len) {
         return acosf(std::clamp(XMVectorGetX(XMVector3Dot(v, d)), -1.0f, 1.0f));
     };
     float best = XMConvertToRadians(maxDeg);
+    bool onHandle = false;   // a handle of the selected window: drawn over the guide panel, so it wins over it
+    XMVECTOR hp = XMVectorZero();
     if (g_selected >= 0 && g_selected < (int)g_windows.size()) {
         const Window& w = g_windows[g_selected];
         auto consider = [&](GrabMode m, int k) {
             XMVECTOR p = TargetPoint(w, m, k);
             float a = angle(p);
-            if (a < best) { best = a; g = { m, g_selected, k }; gl = Dist(o, p); }
+            if (a < best) { best = a; g = { m, g_selected, k }; gl = Dist(o, p); onHandle = true; hp = p; }
         };
         if (IsShape(w)) {
             for (int k = 0; k < (int)w.pts.size(); ++k) { consider(GRAB_POINT, k); consider(GRAB_ADDPT, k); }
@@ -1546,9 +1558,15 @@ static GazeTarget RayTarget(XMVECTOR o, XMVECTOR d, float maxDeg, float* len) {
             if (fabsf(l.x) < w.hw && fabsf(l.y) < w.hh) { bestT = t; g = { GRAB_MOVE, wi, -1 }; gl = t; }
         }
     }
-    // The panel is solid: if the ray reaches it first, that's what it's on.
+    // The panel is solid: if the ray reaches it first, that's what it's on. Except the selected window's
+    // handles and buttons: they're drawn on top of the panel, so pointing at one gets it, even with the
+    // panel nearer (otherwise you'd see the button but couldn't press it).
     float gt; XMFLOAT3 l;
-    if (GuideRay(o, d, gt, l) && (g.mode == GRAB_NONE || gt < gl)) {
+    if (onHandle) {   // ...unless the handle itself is behind the panel (hidden there, see UpdateGuide)
+        float ht; XMFLOAT3 hl;
+        if (GuideRay(o, XMVector3Normalize(hp - o), ht, hl) && ht < gl) onHandle = false;
+    }
+    if (!onHandle && GuideRay(o, d, gt, l) && (g.mode == GRAB_NONE || gt < gl)) {
         int idx = -1;
         GrabMode gm = GuideButtonAt(l.x, l.y, &idx);
         g = { gm, -1, idx };
@@ -1591,7 +1609,7 @@ static XMVECTOR LaserPlanePoint(const HandState& h, const Window& w) {
 // Laser on the depth dot: the point on the dot's front-back line closest to the ray.
 static XMVECTOR LaserDepthPoint(const HandState& h, const Window& w) {
     XMVECTOR o = V(h.aimO), d = V(h.aimD);
-    XMVECTOR a = WinToWorld(w, w.hw + kDepthOut, 0, 0);
+    XMVECTOR a = WinToWorld(w, w.hw + DepthOut(w), 0, 0);
     XMVECTOR u = XMVector3Rotate(XMVectorSet(0, 0, 1, 0), XMLoadFloat4(&w.rot));
     // closest points between lines a + s u and o + t d
     float b = XMVectorGetX(XMVector3Dot(u, d));
@@ -1825,9 +1843,8 @@ static void BeginGrab(HandState& h) {
         Log("Tracing a new outline for window %d\n", h.win);
         return;
     }
-    // 0b. Hand (or controller tip) on the guide panel: move it, or its "move all windows" button.
-    { int pi = -1; if (GrabMode gm = GuideTouch(p, &pi); gm != GRAB_NONE) { BeginGuideGrab(h, gm, false, false, pi); return; } }
-    // 1. Direct touch: hand at a dot. Dots exist only on the selected window.
+    // 1. Direct touch: hand at a dot. Dots exist only on the selected window. Checked before the guide
+    // panel: the dots are drawn on top of it, so touching one gets the dot, not the panel behind it.
     if (g_selected >= 0 && g_selected < (int)g_windows.size()) {
         int wi = g_selected;
         Window& w = g_windows[wi];
@@ -1853,6 +1870,8 @@ static void BeginGrab(HandState& h) {
         float d = Dist(p, WinToWorld(w, 0, 0));
         if (d < kCenterHit && d < best) { best = d; h.mode = GRAB_MOVE; h.win = wi; }
     }
+    // 1b. Hand (or controller tip) on the guide panel: move it, or its "move all windows" button.
+    if (h.mode == GRAB_NONE) { int pi = -1; if (GrabMode gm = GuideTouch(p, &pi); gm != GRAB_NONE) { BeginGuideGrab(h, gm, false, false, pi); return; } }
     // 2. Eyes (or the controller's laser): whatever you're looking or pointing at.
     if (h.mode == GRAB_NONE && (gt.mode == GRAB_GUIDE || gt.mode == GRAB_ALL || gt.mode == GRAB_PRESET)) { BeginGuideGrab(h, gt.mode, true, useLaser, gt.corner); return; }
     if (h.mode == GRAB_NONE && gt.mode != GRAB_NONE && gt.win >= 0 && gt.win < (int)g_windows.size()) {
@@ -2508,8 +2527,10 @@ static void UpdateGuide(XrSpace space, XMVECTOR head, double dt, double now) {
             float dq = XMVectorGetX(XMVector3Dot(q - pos, n));
             if (dq > -0.005f) return false;               // in front of the panel
             XMVECTOR x = head + (q - head) * (dHead / (dHead - dq)) - pos;
-            return fabsf(XMVectorGetX(XMVector3Dot(x, right))) < kGuideHalfW + u.r &&
-                   fabsf(XMVectorGetX(XMVector3Dot(x, pu))) < kGuideHalfH + u.r;
+            // Only if its centre is behind the panel: no margin of the icon's size, which grows with
+            // distance (FarScale) and made an invisible border round the panel hiding far windows' buttons.
+            return fabsf(XMVectorGetX(XMVector3Dot(x, right))) < kGuideHalfW &&
+                   fabsf(XMVectorGetX(XMVector3Dot(x, pu))) < kGuideHalfH;
         };
         g_uiInst.erase(std::remove_if(g_uiInst.begin(), g_uiInst.end(), behind), g_uiInst.end());
     }
@@ -3092,9 +3113,12 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
                 }
             }
             if (!selected) continue;
-            // Handles: discs in the window's plane, each with a symbol for what it does.
+            // Handles: discs with a symbol for what they do. Move, corner and rounding handles lie in the
+            // window's plane (their arrows point along it); the buttons above the window and the depth and
+            // keep-box handles always face you (zero axes = face the eye), so they read from any angle.
             XMVECTOR wq = XMLoadFloat4(&w.rot);
             XMVECTOR wr = XMVector3Rotate(XMVectorSet(1, 0, 0, 0), wq), wu = XMVector3Rotate(XMVectorSet(0, 1, 0, 0), wq);
+            const XMVECTOR face = XMVectorZero();
             auto icon = [&](XMVECTOR at, float r, IconId id, float cr, float cg, float cb, XMVECTOR ax, XMVECTOR ay,
                             const float* glyphCol = nullptr) {
                 Inst u{};
@@ -3114,13 +3138,14 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
                     if (h.active && Dist(V(h.pinchPt), DepthHandle(w)) < kDepthHit) hover = true;
                 }
                 float dr = kDepthHandleR * (hover || active ? 1.25f : 1.0f);
-                // dotted link from the edge out to the handle
-                for (float x = 0.008f; x < kDepthOut - dr; x += 0.008f) {
+                // dotted link from the edge out to the handle (spread like the handle on far windows)
+                const float ss = SpreadSide(w);
+                for (float x = 0.008f * ss; x < DepthOut(w) - dr * ss; x += 0.008f * ss) {
                     XMFLOAT3 p; XMStoreFloat3(&p, WinToWorld(w, w.hw + x, 0, 0));
-                    g_uiInst.push_back({ p.x, p.y, p.z, 0.0018f, 0.1f, 0.68f, 0.22f, 1 });
+                    g_uiInst.push_back({ p.x, p.y, p.z, 0.0018f * ss, 0.1f, 0.68f, 0.22f, 1 });
                 }
-                if (active) icon(DepthHandle(w), dr, ICON_DEPTH, 1, 0.9f, 0.2f, wr, wu);
-                else icon(DepthHandle(w), dr, ICON_DEPTH, hover ? 0.3f : 0.1f, hover ? 0.9f : 0.68f, hover ? 0.4f : 0.22f, wr, wu);
+                if (active) icon(DepthHandle(w), dr, ICON_DEPTH, 1, 0.9f, 0.2f, face, face);
+                else icon(DepthHandle(w), dr, ICON_DEPTH, hover ? 0.3f : 0.1f, hover ? 0.9f : 0.68f, hover ? 0.4f : 0.22f, face, face);
             }
             auto gazeOn = [&](GrabMode m, int k) {
                 return RayOn(m, wi, k);
@@ -3146,7 +3171,7 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
                 bool hover = gazeOn(GRAB_TYPE, -1) || handHover(at, kButtonHit);
                 float s = hover ? 1.0f : 0.8f;
                 icon(at, kButtonR * (hover ? 1.25f : 1.0f), IsShape(w) ? ICON_TO_RECT : ICON_TO_SHAPE,
-                     0.5f * s, 0.25f * s, 1.0f * s, wr, wu);
+                     0.5f * s, 0.25f * s, 1.0f * s, face, face);
             }
             // keep-box button (solid box, the inverse of the depth handle): white with a green box while
             // it's a keep box, grey while off
@@ -3155,7 +3180,7 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
                 bool hover = gazeOn(GRAB_KEEPBTN, -1) || handHover(at, kButtonHit);
                 static const float gOn[3] = { 0.1f, 0.68f, 0.22f }, gOff[3] = { 0.16f, 0.55f, 0.26f };
                 float b = w.keep ? 0.95f : (hover ? 0.62f : 0.42f);
-                icon(at, kButtonR * (hover || w.keep ? 1.25f : 1.0f), ICON_KEEP, b, b, b, wr, wu, w.keep ? gOn : gOff);
+                icon(at, kButtonR * (hover || w.keep ? 1.25f : 1.0f), ICON_KEEP, b, b, b, face, face, w.keep ? gOn : gOff);
             }
             if (!IsShape(w)) {
                 // circle button (teal): shows what it switches to (a circle, or back to a rectangle)
@@ -3163,14 +3188,14 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
                 bool hover = gazeOn(GRAB_CIRCLEBTN, -1) || handHover(at, kButtonHit);
                 float s = hover ? 1.0f : 0.82f;
                 icon(at, kButtonR * (hover ? 1.25f : 1.0f), w.ellipse ? ICON_TO_RECT : ICON_TO_CIRCLE,
-                     0.05f * s, 0.62f * s, 0.7f * s, wr, wu);
+                     0.05f * s, 0.62f * s, 0.7f * s, face, face);
             }
             {
                 // lock button: gold with a closed padlock while the angle is locked, grey and open while not
                 XMVECTOR at = TargetPoint(w, GRAB_LOCKBTN, -1);
                 bool hover = gazeOn(GRAB_LOCKBTN, -1) || handHover(at, kButtonHit);
-                if (w.lock) icon(at, kButtonR * 1.25f, ICON_LOCK, 0.98f, 0.76f, 0.12f, wr, wu);
-                else { float b = hover ? 0.62f : 0.42f; icon(at, kButtonR * (hover ? 1.25f : 1.0f), ICON_UNLOCK, b, b, b, wr, wu); }
+                if (w.lock) icon(at, kButtonR * 1.25f, ICON_LOCK, 0.98f, 0.76f, 0.12f, face, face);
+                else { float b = hover ? 0.62f : 0.42f; icon(at, kButtonR * (hover ? 1.25f : 1.0f), ICON_UNLOCK, b, b, b, face, face); }
             }
             {
                 // snap button (pale blue, upright post): stand it upright / lay it level, square to the world
@@ -3178,7 +3203,7 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
                 bool hover = gazeOn(GRAB_SNAPBTN, -1) || handHover(at, kButtonHit);
                 static const float dark[3] = { 0.08f, 0.09f, 0.11f };
                 float s = hover ? 1.0f : 0.85f;
-                icon(at, kButtonR * (hover ? 1.25f : 1.0f), ICON_SNAP, 0.55f * s, 0.8f * s, 1.0f * s, wr, wu, dark);
+                icon(at, kButtonR * (hover ? 1.25f : 1.0f), ICON_SNAP, 0.55f * s, 0.8f * s, 1.0f * s, face, face, dark);
             }
             if (IsShape(w)) {
                 // draw button (white pencil button; red while armed)
@@ -3186,7 +3211,7 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
                 bool hover = gazeOn(GRAB_DRAWBTN, -1) || handHover(at, kButtonHit);
                 bool armed = g_drawArmed == wi;
                 icon(at, kButtonR * (hover || armed ? 1.25f : 1.0f), ICON_DRAW,
-                     armed ? 0.95f : 0.92f, armed ? 0.2f : 0.92f, armed ? 0.2f : 0.92f, wr, wu);
+                     armed ? 0.95f : 0.92f, armed ? 0.2f : 0.92f, armed ? 0.2f : 0.92f, face, face);
                 // points (orange) and edge handles (small, pale, plus: pinch to add a point)
                 for (int k = 0; k < (int)w.pts.size(); ++k) {
                     bool active = false;

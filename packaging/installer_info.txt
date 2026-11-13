@@ -1,4 +1,4 @@
-ALPHA VIEWS XR  v1.4.3  by GmoLargey
+ALPHA VIEWS XR  v1.4.4  by GmoLargey
 https://github.com/GmoLargey
 If you want to support me: https://ko-fi.com/virtuallyreal
 Free, open-source software (GNU GPL version 3).
