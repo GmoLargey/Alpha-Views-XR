@@ -51,6 +51,14 @@
 //                          standing in it. Needs the game's depth.
 //     type (purple)        above the selected window: rounded rectangle <-> free shape (shows
 //                          the outline it switches to).
+//     lock (padlock, left of the purple button; gold while locked, grey while not): lock the
+//                          window's angle. Moving it then never tilts or turns it (it follows the
+//                          point you grabbed); only the snap button turns it. Saved with the window.
+//     snap (pale blue, upright post, right end of the row above the window): square the window
+//                          up with the game world, facing you. First press: whichever is nearest of
+//                          upright facing forward / back (Z), upright facing the side (X), lying
+//                          level (Y). Each further press: the next one of the three.
+//     Boxes can be as deep as you like (up to 100 m; the thumbstick speeds up on deep boxes).
 //     Free shapes (up to 32 points, flat or box): orange point handles drag (tap = remove),
 //     small "+" handles on the edges add a point, the pencil arms tracing (red): the next pinch
 //     draws the outline, release to finish.
@@ -206,8 +214,13 @@ struct Window {
     // Circle (1.4.0): an ellipse filling the window's width and height (a circle when square).
     // Not for free shapes. Corners, move, depth and keep all still work.
     bool ellipse = false;
+    // Lock (1.4.3): moving the window never changes its angle (no tilting while you push it about).
+    // Only the snap button turns a locked window.
+    bool lock = false;
 };
-static const float kMaxHalfDepth = 0.5f;
+// Box half depth limit: big enough for any box you'd want (a whole room or more), small enough to keep
+// the numbers sane. (Was 0.5 m, i.e. 1 m of total depth, before 1.4.3.)
+static const float kMaxHalfDepth = 50.0f;
 static const int kMaxShapePts = 32;   // must match the shader's pts[16] (two points per float4)
 static bool IsShape(const Window& w) { return w.pts.size() >= 3; }
 static const float kDepthHandleR = 0.014f, kDepthHit = 0.035f;
@@ -218,10 +231,11 @@ static XMMATRIX WinMatrix(const Window& w) {
 static XMVECTOR WinToWorld(const Window& w, float x, float y, float z = 0) {
     return XMVector3TransformCoord(XMVectorSet(x, y, z, 1), WinMatrix(w));
 }
-// Depth handle: on the right edge, at the box's front face (towards the driver).
-// Just outside the right edge, so it never covers the outline (shape points, + handles, corners).
-static const float kDepthOut = 0.045f;
-static XMVECTOR DepthHandle(const Window& w) { return WinToWorld(w, w.hw + kDepthOut, 0, w.hd); }
+// Depth handle: outside the right edge, on the window's centre line (the middle of the box, where every
+// other handle is, so it stays put however deep the box gets). Far enough out to keep clear of the corner
+// handles, even on a short window.
+static const float kDepthOut = 0.075f;
+static XMVECTOR DepthHandle(const Window& w) { return WinToWorld(w, w.hw + kDepthOut, 0, 0); }
 static XMFLOAT3 WorldToWin(const Window& w, XMVECTOR p) {
     XMFLOAT3 r; XMStoreFloat3(&r, XMVector3TransformCoord(p, XMMatrixInverse(nullptr, WinMatrix(w))));
     return r;
@@ -443,7 +457,7 @@ struct Inst {
     float gr = 0, gg = 0, gb = 0, ga = 0;
 };
 enum IconId { ICON_DOT, ICON_MOVE, ICON_RESIZE, ICON_ROUND, ICON_DEPTH, ICON_KEEP, ICON_TO_SHAPE, ICON_TO_RECT,
-              ICON_DRAW, ICON_POINT, ICON_ADD, ICON_TO_CIRCLE };
+              ICON_DRAW, ICON_POINT, ICON_ADD, ICON_TO_CIRCLE, ICON_LOCK, ICON_UNLOCK, ICON_SNAP };
 
 // CPU copy of Glyph() in shaders.hlsl, for the guide panel's legend. Keep them in step.
 namespace glyph {
@@ -511,6 +525,22 @@ static float Glyph(int id, P p) {
     if (id == ICON_POINT) return Len(p) - 0.32f;
     if (id == ICON_ADD) return min(Seg(p, { -0.5f, 0 }, { 0.5f, 0 }), Seg(p, { 0, -0.5f }, { 0, 0.5f })) - 0.12f;
     if (id == ICON_TO_CIRCLE) return fabsf(Len(p) - 0.48f) - 0.08f;
+    if (id == ICON_LOCK || id == ICON_UNLOCK) {
+        // Padlock: body with a keyhole, shackle closed (lock) or lifted open on the right (unlock).
+        float body = max(Box(p, { 0, -0.2f }, { 0.36f, 0.27f }), -(Len(p - P{ 0, -0.17f }) - 0.08f));
+        P c{ 0, id == ICON_LOCK ? 0.07f : 0.2f };
+        P q = p - c;
+        float arc = q.y >= 0 ? fabsf(Len(q) - 0.22f) : 1e3f;
+        float legs = Seg(p, { -0.22f, c.y }, { -0.22f, 0.07f });
+        if (id == ICON_LOCK) legs = min(legs, Seg(p, { 0.22f, c.y }, { 0.22f, 0.07f }));
+        return min(body, min(arc, legs) - 0.07f);
+    }
+    if (id == ICON_SNAP) {
+        // Upright: a post standing square on a base line, with a right-angle mark.
+        float d = min(Seg(p, { -0.5f, -0.4f }, { 0.5f, -0.4f }), Seg(p, { 0, -0.4f }, { 0, 0.52f }));
+        d = min(d, min(Seg(p, { 0.2f, -0.4f }, { 0.2f, -0.2f }), Seg(p, { 0.2f, -0.2f }, { 0, -0.2f })));
+        return d - 0.07f;
+    }
     return 1e3f;
 }
 }  // namespace glyph
@@ -520,6 +550,8 @@ static float Glyph(int id, P p) {
 // GRAB_TRACE: drawing a new outline. GRAB_KEEPBTN: the keep-box button next to the depth dot.
 enum GrabMode { GRAB_NONE, GRAB_MOVE, GRAB_CORNER, GRAB_RADIUS, GRAB_DEPTH,
                 GRAB_POINT, GRAB_ADDPT, GRAB_TYPE, GRAB_DRAWBTN, GRAB_TRACE, GRAB_KEEPBTN, GRAB_CIRCLEBTN,
+                GRAB_LOCKBTN,    // lock button above the window: angle locked while moving, on / off
+                GRAB_SNAPBTN,    // snap button above the window: stand it upright / lay it level (cycles)
                 GRAB_GUIDE,      // the guide panel: move it
                 GRAB_ALL,        // the guide's "move all windows" button: all windows move together
                 GRAB_PRESET };   // a guide preset button (corner = preset 0..2): tap loads, hold saves
@@ -575,6 +607,7 @@ struct HandState {
     XMFLOAT3 targetStart{};          // grabbed dot's world position at pinch start
     XMFLOAT3 winStartPos{};
     XMFLOAT4 winStartRot{}, handStartRot{};
+    float winStartHw = 0, winStartHh = 0, winStartHd = 0;   // size when the grab / drag began
     // gestures
     double thumbsUpSince = -1, thumbsDownSince = -1;
     bool thumbsLatched = false, thumbsDownLatched = false;
@@ -928,12 +961,16 @@ static bool ReadWindows(const std::string& path, bool* enabled) {
                 }
                 if (w.pts.size() < 3) w.pts.clear(); else UpdateShapeBounds(w);
             }
-            // Then the keep-box flag (0 / 1), then the circle flag (0 / 1).
-            int ell = 0;
+            // Then the keep-box flag (0 / 1), then the circle flag (0 / 1), then the lock flag (0 / 1, 1.4.3).
+            int ell = 0, lock = 0;
             if (ok && sscanf(c, "%d%n", &keep, &adv) == 1) {
                 w.keep = keep != 0;
                 c += adv;
-                if (sscanf(c, "%d", &ell) == 1) w.ellipse = ell != 0 && !IsShape(w);
+                if (sscanf(c, "%d%n", &ell, &adv) == 1) {
+                    w.ellipse = ell != 0 && !IsShape(w);
+                    c += adv;
+                    if (sscanf(c, "%d", &lock) == 1) w.lock = lock != 0;
+                }
             }
             ws.push_back(w);
         }
@@ -968,7 +1005,7 @@ static bool WriteWindows(const std::string& path) {
             w.rot.x, w.rot.y, w.rot.z, w.rot.w, w.hw, w.hh, w.radius[0], w.radius[1], w.radius[2], w.radius[3],
             0, 0, 0, 0, w.hd, IsShape(w) ? (int)w.pts.size() : 0);
         if (IsShape(w)) for (auto& p : w.pts) fprintf(f, " %f %f", p.x, p.y);
-        fprintf(f, " %d %d\n", w.keep ? 1 : 0, w.ellipse ? 1 : 0);
+        fprintf(f, " %d %d %d\n", w.keep ? 1 : 0, w.ellipse ? 1 : 0, w.lock ? 1 : 0);
     }
     fclose(f);
     return true;
@@ -1395,12 +1432,14 @@ static XMMATRIX HandGrabMatrix(const HandState& h) {
 // shapes, draw (white; red while armed).
 static const float kPointR = 0.011f, kPointHit = 0.03f, kMidR = 0.0065f, kMidHit = 0.02f;
 static const float kButtonR = 0.013f, kButtonHit = 0.03f;
-// Buttons above the window: type (left) and, beside it, draw (free shapes) or circle (rectangles).
+// Buttons above the window, left to right: lock, type, draw (free shapes) or circle (rectangles), snap.
+static XMFLOAT2 LockButtonLocal(const Window& w) { return { -0.09f, w.hh + 0.045f }; }
 static XMFLOAT2 TypeButtonLocal(const Window& w) { return { -0.03f, w.hh + 0.045f }; }
 static XMFLOAT2 DrawButtonLocal(const Window& w) { return { 0.03f, w.hh + 0.045f }; }
 static XMFLOAT2 CircleButtonLocal(const Window& w) { return { 0.03f, w.hh + 0.045f }; }
-// Keep-box button (solid box): just outside the depth handle, at the box's front face.
-static XMVECTOR KeepButton(const Window& w) { return WinToWorld(w, w.hw + kDepthOut + 0.042f, 0, w.hd); }
+static XMFLOAT2 SnapButtonLocal(const Window& w) { return { 0.09f, w.hh + 0.045f }; }
+// Keep-box button (solid box): just outside the depth handle, on the centre line too.
+static XMVECTOR KeepButton(const Window& w) { return WinToWorld(w, w.hw + kDepthOut + 0.042f, 0, 0); }
 static XMFLOAT2 MidLocal(const Window& w, int k) {
     const XMFLOAT2 &a = w.pts[k], &b = w.pts[(k + 1) % w.pts.size()];
     return { (a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f };
@@ -1417,6 +1456,8 @@ static XMVECTOR TargetPoint(const Window& w, GrabMode mode, int corner) {
     if (mode == GRAB_DEPTH) return DepthHandle(w);
     if (mode == GRAB_KEEPBTN) return KeepButton(w);
     if (mode == GRAB_CIRCLEBTN) { XMFLOAT2 b = CircleButtonLocal(w); return WinToWorld(w, b.x, b.y); }
+    if (mode == GRAB_LOCKBTN) { XMFLOAT2 b = LockButtonLocal(w); return WinToWorld(w, b.x, b.y); }
+    if (mode == GRAB_SNAPBTN) { XMFLOAT2 b = SnapButtonLocal(w); return WinToWorld(w, b.x, b.y); }
     return WinToWorld(w, 0, 0);
 }
 
@@ -1488,6 +1529,8 @@ static GazeTarget RayTarget(XMVECTOR o, XMVECTOR d, float maxDeg, float* len) {
         consider(GRAB_DEPTH, -1);
         consider(GRAB_KEEPBTN, -1);
         if (!IsShape(w)) consider(GRAB_CIRCLEBTN, -1);
+        consider(GRAB_LOCKBTN, -1);
+        consider(GRAB_SNAPBTN, -1);
         consider(GRAB_MOVE, -1); // centre dot
     }
     if (g.mode == GRAB_NONE) {
@@ -1565,6 +1608,7 @@ static const char* GrabName(GrabMode m) {
     case GRAB_DEPTH: return "depth"; case GRAB_POINT: return "shape point"; case GRAB_ADDPT: return "add point";
     case GRAB_TYPE: return "type button"; case GRAB_DRAWBTN: return "draw button"; case GRAB_TRACE: return "trace";
     case GRAB_KEEPBTN: return "keep-box button"; case GRAB_CIRCLEBTN: return "circle button";
+    case GRAB_LOCKBTN: return "lock button"; case GRAB_SNAPBTN: return "snap button";
     case GRAB_GUIDE: return "guide panel"; case GRAB_ALL: return "all windows"; case GRAB_PRESET: return "preset button";
     default: return "none";
     }
@@ -1597,6 +1641,55 @@ static void ToggleKeep(int wi) {
     w.keep = !w.keep;
     Log("Window %d is now a %s\n", wi, w.keep ? "keep box (passthrough, but the game's surfaces inside the box stay)"
                                                 : "normal window (the game inside it turns into passthrough)");
+    SaveWindows();
+}
+
+// Lock button: while locked, moving the window keeps its angle (it can't be tilted by accident).
+static void ToggleLock(int wi) {
+    Window& w = g_windows[wi];
+    w.lock = !w.lock;
+    Log("Window %d angle %s\n", wi, w.lock ? "locked: moving it keeps its angle (the snap button still turns it)" : "unlocked");
+    SaveWindows();
+}
+// Snap button: square the window up with the game world's axes, facing you. Each press goes one step
+// further: upright facing forward / back (Z), upright facing the side (X), lying level (Y), then round
+// again. The first press on a window that isn't square yet picks whichever of the three is nearest,
+// so a window that got tilted while pushing it out just stands back up.
+static XMVECTOR SnapRot(const Window& w, int k) {
+    static const XMVECTOR kAxis[3] = { XMVectorSet(0, 0, 1, 0), XMVectorSet(1, 0, 0, 0), XMVectorSet(0, 1, 0, 0) };
+    XMVECTOR q = XMLoadFloat4(&w.rot);
+    XMVECTOR n = XMVector3Rotate(XMVectorSet(0, 0, 1, 0), q), u = XMVector3Rotate(XMVectorSet(0, 1, 0, 0), q);
+    // Face you (the window's front, +Z, points towards your head along that axis).
+    float toHead = XMVectorGetX(XMVector3Dot(g_head - V(w.pos), kAxis[k]));
+    float s = fabsf(toHead) > 1e-3f ? toHead : XMVectorGetX(XMVector3Dot(n, kAxis[k]));
+    XMVECTOR nt = kAxis[k] * (s < 0 ? -1.0f : 1.0f);
+    XMVECTOR up = kAxis[2];
+    if (k == 2) {
+        // Lying level: its top edge points along the level axis (X or Z) nearest to where it points now.
+        // Upright now: it tips back, so its top edge goes away from you.
+        XMVECTOR hz = u - kAxis[2] * XMVectorGetX(XMVector3Dot(u, kAxis[2]));
+        if (XMVectorGetX(XMVector3Length(hz)) < 0.3f) hz = -(n - kAxis[2] * XMVectorGetX(XMVector3Dot(n, kAxis[2])));
+        float hx = XMVectorGetX(hz), hzz = XMVectorGetZ(hz);
+        up = fabsf(hx) > fabsf(hzz) ? XMVectorSet(hx < 0 ? -1.0f : 1.0f, 0, 0, 0) : XMVectorSet(0, 0, hzz < 0 ? -1.0f : 1.0f, 0);
+    }
+    XMVECTOR r = XMVector3Cross(up, nt);   // local x = y cross z
+    XMMATRIX m(r, up, nt, XMVectorSet(0, 0, 0, 1));
+    return XMQuaternionNormalize(XMQuaternionRotationMatrix(m));
+}
+static void SnapWindow(int wi) {
+    Window& w = g_windows[wi];
+    static const char* kName[3] = { "upright, facing forward / back (Z)", "upright, facing the side (X)", "level (Y)" };
+    XMVECTOR q = XMLoadFloat4(&w.rot);
+    XMVECTOR n = XMVector3Rotate(XMVectorSet(0, 0, 1, 0), q);
+    // Nearest of the three to the window's facing now.
+    float az = fabsf(XMVectorGetZ(n)), ax = fabsf(XMVectorGetX(n)), ay = fabsf(XMVectorGetY(n));
+    int k = az >= ax && az >= ay ? 0 : ax >= ay ? 1 : 2;
+    // Already square there (within ~1 degree): next one.
+    XMVECTOR t = SnapRot(w, k);
+    if (fabsf(XMVectorGetX(XMVector4Dot(q, t))) > 0.99996f) { k = (k + 1) % 3; t = SnapRot(w, k); }
+    XMStoreFloat4(&w.rot, t);
+    for (auto& h : g_hand) if (h.win == wi && h.mode == GRAB_MOVE) { h.mode = GRAB_NONE; h.win = -1; }   // re-grab from here
+    Log("Window %d snapped %s\n", wi, kName[k]);
     SaveWindows();
 }
 
@@ -1753,6 +1846,8 @@ static void BeginGrab(HandState& h) {
         at(GRAB_TYPE, -1, kButtonHit);
         at(GRAB_KEEPBTN, -1, kButtonHit);
         if (!IsShape(w)) at(GRAB_CIRCLEBTN, -1, kButtonHit);
+        at(GRAB_LOCKBTN, -1, kButtonHit);
+        at(GRAB_SNAPBTN, -1, kButtonHit);
         float dd = Dist(p, DepthHandle(w));
         if (dd < kDepthHit && dd < best) { best = dd; h.mode = GRAB_DEPTH; h.win = wi; }
         float d = Dist(p, WinToWorld(w, 0, 0));
@@ -1790,6 +1885,8 @@ static void BeginGrab(HandState& h) {
     if (h.mode == GRAB_TYPE && h.win >= 0) ToggleShape(h.win);
     if (h.mode == GRAB_KEEPBTN && h.win >= 0) ToggleKeep(h.win);
     if (h.mode == GRAB_CIRCLEBTN && h.win >= 0) ToggleCircle(h.win);
+    if (h.mode == GRAB_LOCKBTN && h.win >= 0) ToggleLock(h.win);
+    if (h.mode == GRAB_SNAPBTN && h.win >= 0) SnapWindow(h.win);
     if (h.mode == GRAB_DRAWBTN && h.win >= 0) {
         g_drawArmed = h.win;
         Log("Draw: pinch and trace the new outline of window %d (release to finish)\n", h.win);
@@ -1877,6 +1974,7 @@ static void UpdateGrab(HandState& h) {
         h.pinchStartPt = h.pinchPt;
         h.handStartRot = h.grabRot;
         h.winStartPos = w.pos; h.winStartRot = w.rot;
+        h.winStartHw = w.hw; h.winStartHh = w.hh; h.winStartHd = w.hd;
         XMStoreFloat3(&h.laserStart, rayPt);
         if (h.mode == GRAB_MOVE && h.laser) {
             // as held now (UpdateGrab: turn * rel * push * controller = the window)
@@ -1899,22 +1997,35 @@ static void UpdateGrab(HandState& h) {
         else if (onPlane) p = LaserPlanePoint(h, w) + (h.mode == GRAB_TRACE ? XMVectorZero() : V(h.dragOffset));
         else p = rayPt;
     }
+    // Held rigidly (hand or laser): the window goes where the hand's motion carries it. Locked windows
+    // keep the angle they had when the drag began, and only follow the grabbed point (where the hand or
+    // laser took hold), so turning your hand or controller moves the window but never tilts it.
+    auto placeRigid = [&](FXMMATRIX m, XMVECTOR grabStart) {
+        XMVECTOR s, r, t;
+        if (!XMMatrixDecompose(&s, &r, &t, m)) return;
+        if (!w.lock) { XMStoreFloat3(&w.pos, t); XMStoreFloat4(&w.rot, XMQuaternionNormalize(r)); return; }
+        XMMATRIX start = XMMatrixRotationQuaternion(XMLoadFloat4(&h.winStartRot)) *
+                         XMMatrixTranslation(h.winStartPos.x, h.winStartPos.y, h.winStartPos.z);
+        XMVECTOR local = XMVector3TransformCoord(grabStart, XMMatrixInverse(nullptr, start));
+        XMVECTOR now = XMVector3TransformCoord(local, m);
+        XMStoreFloat3(&w.pos, V(h.winStartPos) + (now - grabStart));
+        w.rot = h.winStartRot;
+    };
     if (h.mode == GRAB_MOVE && h.laser) {
         // Held rigidly at a distance (like a direct grab on a long stick), plus the thumbstick's
         // push / pull along the controller's aim and turn about the window's own vertical axis.
         XMMATRIX m = XMMatrixRotationY(h.turn) * XMLoadFloat4x4(&h.rel) * XMMatrixTranslation(0, 0, -h.push) * HandGrabMatrix(h);
-        XMVECTOR s, r, t;
-        if (XMMatrixDecompose(&s, &r, &t, m)) { XMStoreFloat3(&w.pos, t); XMStoreFloat4(&w.rot, XMQuaternionNormalize(r)); }
+        placeRigid(m, V(h.laserStart));
     } else if (h.mode == GRAB_MOVE && h.indirect) {
-        // Move by scaled hand motion; tilt/rotate by the hand's rotation since the pinch.
-        XMVECTOR q0 = XMLoadFloat4(&h.handStartRot), q1 = XMLoadFloat4(&h.grabRot);
-        XMVECTOR delta = XMQuaternionMultiply(XMQuaternionInverse(q0), q1);
-        XMStoreFloat4(&w.rot, XMQuaternionNormalize(XMQuaternionMultiply(XMLoadFloat4(&h.winStartRot), delta)));
+        // Move by scaled hand motion; tilt/rotate by the hand's rotation since the pinch (not when locked).
+        if (!w.lock) {
+            XMVECTOR q0 = XMLoadFloat4(&h.handStartRot), q1 = XMLoadFloat4(&h.grabRot);
+            XMVECTOR delta = XMQuaternionMultiply(XMQuaternionInverse(q0), q1);
+            XMStoreFloat4(&w.rot, XMQuaternionNormalize(XMQuaternionMultiply(XMLoadFloat4(&h.winStartRot), delta)));
+        }
         XMStoreFloat3(&w.pos, V(h.winStartPos) + handDelta * h.gain);
     } else if (h.mode == GRAB_MOVE) {
-        XMMATRIX m = XMLoadFloat4x4(&h.rel) * HandGrabMatrix(h);
-        XMVECTOR s, r, t;
-        if (XMMatrixDecompose(&s, &r, &t, m)) { XMStoreFloat3(&w.pos, t); XMStoreFloat4(&w.rot, XMQuaternionNormalize(r)); }
+        placeRigid(XMLoadFloat4x4(&h.rel) * HandGrabMatrix(h), V(h.pinchStartPt));
     } else if (h.mode == GRAB_CORNER) {
         int k = h.corner;
         XMFLOAT3 l = WorldToWin(w, p);
@@ -1932,8 +2043,10 @@ static void UpdateGrab(HandState& h) {
         float r = std::clamp((u - kRadiusHandleInset) / kArcK, 0.0f, std::min(w.hw, w.hh));
         w.radius[k] = r;
     } else if (h.mode == GRAB_DEPTH) {
-        // The box grows evenly in front of and behind the window. Pushed back to ~1 cm: flat.
-        float z = WorldToWin(w, p).z;
+        // The box grows evenly in front of and behind the window, by however far the handle moves towards
+        // you (or away: shallower). The handle sits on the centre line, so it's the move that counts, not
+        // where it is. Pushed back to ~1 cm: flat.
+        float z = h.winStartHd + WorldToWin(w, p).z;
         w.hd = z < 0.01f ? 0 : std::min(z, kMaxHalfDepth);
     } else if (h.mode == GRAB_POINT && h.corner >= 0 && h.corner < (int)w.pts.size()) {
         XMFLOAT3 l = WorldToWin(w, p);
@@ -1976,8 +2089,12 @@ static void EndGrab(HandState& h, double now) {
     if (h.win >= 0 && h.win < (int)g_windows.size()) {
         Window& w = g_windows[h.win];
         bool tap = (now - h.pinchStart) < 0.35 && !h.dragging && Dist(V(h.pinchPt), V(h.pinchStartPt)) < 0.012f;
-        if (h.mode == GRAB_CORNER && (w.hw < 0.025f || w.hh < 0.025f)) {
+        // Shrunk to almost nothing (under 2 cm wide or tall) in this drag: delete it. Only when this drag
+        // made it smaller, so touching a corner of a window that's already short never deletes it.
+        bool shrunk = h.dragging && (w.hw < h.winStartHw - 1e-4f || w.hh < h.winStartHh - 1e-4f);
+        if (h.mode == GRAB_CORNER && shrunk && (w.hw < 0.01f || w.hh < 0.01f)) {
             int wi = h.win;
+            Log("Window %d shrunk to %.1f x %.1f cm: deleting it\n", wi, w.hw * 200, w.hh * 200);
             h.mode = GRAB_NONE; h.win = -1;
             DeleteWindow(wi);
             return;
@@ -2288,18 +2405,22 @@ static void RenderGuide() {
         { ICON_TO_CIRCLE, { 0.05f, 0.62f, 0.7f }, {}, false, 0, L"circle" },
         { ICON_DRAW, { 0.92f, 0.92f, 0.92f }, {}, false, 0, L"draw" },
         { ICON_ADD, { 1, 0.78f, 0.55f }, {}, false, 0, L"add point" },
+        { ICON_LOCK, { 0.98f, 0.76f, 0.12f }, {}, false, 0, L"lock angle" },
+        { ICON_SNAP, { 0.55f, 0.8f, 1 }, { 0.08f, 0.09f, 0.11f }, true, 0, L"snap upright / level" },
     };
     struct Placed { int x, y; };
     Placed placed[_countof(legend)];
     text(L"Handles:", fNote, cDim, { x1, y, x1 + 140, y + 40 }, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     int x = x1 + 120;
     for (size_t i = 0; i < _countof(legend); ++i) {
-        placed[i] = { x + 19, y + 20 };
-        RECT m{ x + 46, y, x + 400, y + 40 };
-        text(legend[i].word, fNote, cText, m, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        // Next line when this one is full.
         SelectObject(dc, fNote);
-        RECT calc = m; DrawTextW(dc, legend[i].word, -1, &calc, DT_CALCRECT | DT_SINGLELINE);
-        x = calc.right + 40;
+        RECT need{ 0, 0, 400, 40 }; DrawTextW(dc, legend[i].word, -1, &need, DT_CALCRECT | DT_SINGLELINE);
+        if (x + 46 + need.right > xEnd && x > x1 + 120) { x = x1 + 120; y += 44; }
+        placed[i] = { x + 19, y + 20 };
+        RECT m{ x + 46, y, x + 46 + need.right + 4, y + 40 };
+        text(legend[i].word, fNote, cText, m, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        x = m.right + 40;
     }
 
     // Status columns: selected window, depth, status.
@@ -2728,13 +2849,17 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
                 float dist = std::max(0.5f, -(z0 - h.push));
                 h.push = std::clamp(h.push + sy * dist * float(dt), z0 + 0.15f, std::max(z0 + 0.15f, z0 + 6.0f));
             }
-            if (sx != 0) h.turn -= sx * 1.5f * float(dt);
+            // Turning: not for locked windows (they keep their angle; the snap button squares them up).
+            bool locked = h.win >= 0 && h.win < (int)g_windows.size() && g_windows[h.win].lock;
+            if (sx != 0 && !locked) h.turn -= sx * 1.5f * float(dt);
         }
         // Thumbstick up / down: selected window deeper / shallower.
         else if (h.mode != GRAB_GUIDE && h.mode != GRAB_ALL && h.mode != GRAB_PRESET && fabsf(h.stickY) > 0.3f && g_selected >= 0 && g_selected < (int)g_windows.size()) {
             Window& w = g_windows[g_selected];
             float s = (fabsf(h.stickY) - 0.3f) / 0.7f * (h.stickY > 0 ? 1.0f : -1.0f);
-            w.hd = std::clamp(w.hd + s * 0.15f * float(dt), 0.0f, kMaxHalfDepth);   // up to 30 cm/s total depth
+            // Up to 30 cm/s total depth, faster as the box gets bigger (so a deep box doesn't take ages).
+            float rate = std::max(0.15f, w.hd * 0.8f);
+            w.hd = std::clamp(w.hd + s * rate * float(dt), 0.0f, kMaxHalfDepth);
             stickMoving = stickDirty = true;
         }
     }
@@ -2959,7 +3084,7 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
                 for (int k = 0; k < edges; ++k) {
                     float cx = IsShape(w) ? w.pts[k].x : w.ellipse ? kCS[k][0] * w.hw * 0.70710678f : kCS[k][0] * (w.hw - w.radius[k] * kArcK);
                     float cy = IsShape(w) ? w.pts[k].y : w.ellipse ? kCS[k][1] * w.hh * 0.70710678f : kCS[k][1] * (w.hh - w.radius[k] * kArcK);
-                    int n = std::max(1, int(2 * w.hd / 0.03f));
+                    int n = std::clamp(int(2 * w.hd / 0.03f), 1, 120);   // deep boxes: dots spread out
                     for (int s = 0; s <= n; ++s) {
                         XMFLOAT3 p; XMStoreFloat3(&p, WinToWorld(w, cx, cy, -w.hd + 2 * w.hd * float(s) / n));
                         g_uiInst.push_back({ p.x, p.y, p.z, 0.002f, bc[0], bc[1], bc[2], 1 });
@@ -2991,7 +3116,7 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
                 float dr = kDepthHandleR * (hover || active ? 1.25f : 1.0f);
                 // dotted link from the edge out to the handle
                 for (float x = 0.008f; x < kDepthOut - dr; x += 0.008f) {
-                    XMFLOAT3 p; XMStoreFloat3(&p, WinToWorld(w, w.hw + x, 0, w.hd));
+                    XMFLOAT3 p; XMStoreFloat3(&p, WinToWorld(w, w.hw + x, 0, 0));
                     g_uiInst.push_back({ p.x, p.y, p.z, 0.0018f, 0.1f, 0.68f, 0.22f, 1 });
                 }
                 if (active) icon(DepthHandle(w), dr, ICON_DEPTH, 1, 0.9f, 0.2f, wr, wu);
@@ -3039,6 +3164,21 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
                 float s = hover ? 1.0f : 0.82f;
                 icon(at, kButtonR * (hover ? 1.25f : 1.0f), w.ellipse ? ICON_TO_RECT : ICON_TO_CIRCLE,
                      0.05f * s, 0.62f * s, 0.7f * s, wr, wu);
+            }
+            {
+                // lock button: gold with a closed padlock while the angle is locked, grey and open while not
+                XMVECTOR at = TargetPoint(w, GRAB_LOCKBTN, -1);
+                bool hover = gazeOn(GRAB_LOCKBTN, -1) || handHover(at, kButtonHit);
+                if (w.lock) icon(at, kButtonR * 1.25f, ICON_LOCK, 0.98f, 0.76f, 0.12f, wr, wu);
+                else { float b = hover ? 0.62f : 0.42f; icon(at, kButtonR * (hover ? 1.25f : 1.0f), ICON_UNLOCK, b, b, b, wr, wu); }
+            }
+            {
+                // snap button (pale blue, upright post): stand it upright / lay it level, square to the world
+                XMVECTOR at = TargetPoint(w, GRAB_SNAPBTN, -1);
+                bool hover = gazeOn(GRAB_SNAPBTN, -1) || handHover(at, kButtonHit);
+                static const float dark[3] = { 0.08f, 0.09f, 0.11f };
+                float s = hover ? 1.0f : 0.85f;
+                icon(at, kButtonR * (hover ? 1.25f : 1.0f), ICON_SNAP, 0.55f * s, 0.8f * s, 1.0f * s, wr, wu, dark);
             }
             if (IsShape(w)) {
                 // draw button (white pencil button; red while armed)
@@ -4203,9 +4343,36 @@ static XrResult XRAPI_CALL Hook_xrReleaseSwapchainImage(XrSwapchain sc, const Xr
         // since the last submitted frame, use that frame's views instead (one frame old), because
         // drawing after release is likely too late there.
         bool fresh = !g_locViews.empty() && (!g_on12 || g_locTime > g_endTime);
-        const std::vector<XrView>& views = fresh ? g_locViews : g_endViews;
+        const std::vector<XrView>* viewsP = fresh ? &g_locViews : &g_endViews;
         XrSpace vspace = fresh ? g_locSpace : g_endSpace;
         XrTime vtime = fresh ? g_locTime : g_endTime + g_endPeriod;
+        // Windows live in the space the game submits its frames in (its world). Some engines (Unreal Engine 4)
+        // locate views in another space, e.g. relative to the head: windows kept there would follow the head.
+        // Convert those views into the submitted space.
+        static std::vector<XrView> converted;
+        if (fresh && g_endSpace != XR_NULL_HANDLE && g_locSpace != g_endSpace) {
+            XrSpaceLocation base{ XR_TYPE_SPACE_LOCATION };
+            const XrSpaceLocationFlags need = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+            if (XR_SUCCEEDED(nLocateSpace(g_locSpace, g_endSpace, g_locTime, &base)) && (base.locationFlags & need) == need) {
+                XMVECTOR bq = Q(base.pose.orientation), bp = V(base.pose.position);
+                converted = g_locViews;
+                for (auto& v : converted) {
+                    XMVECTOR p = bp + XMVector3Rotate(V(v.pose.position), bq);
+                    XMVECTOR q = XMQuaternionNormalize(XMQuaternionMultiply(Q(v.pose.orientation), bq));   // base * view
+                    v.pose.position = { XMVectorGetX(p), XMVectorGetY(p), XMVectorGetZ(p) };
+                    v.pose.orientation = { XMVectorGetX(q), XMVectorGetY(q), XMVectorGetZ(q), XMVectorGetW(q) };
+                }
+                viewsP = &converted;
+                vspace = g_endSpace;
+                static bool loggedConvert = false;
+                if (!loggedConvert) {
+                    Log("Game locates views in a different space from its frames (offset %.2f, %.2f, %.2f m): using the frame's space, so windows stay put in the world.\n",
+                        base.pose.position.x, base.pose.position.y, base.pose.position.z);
+                    loggedConvert = true;
+                }
+            }
+        }
+        const std::vector<XrView>& views = *viewsP;
         if (g_dev && it != g_scSlots.end() && !views.empty()) {
             static bool loggedStale = false;
             if (!fresh && !loggedStale) { Log("D3D12: game doesn't locate views before release; using last frame's views.\n"); loggedStale = true; }

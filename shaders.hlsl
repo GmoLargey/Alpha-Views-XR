@@ -254,6 +254,20 @@ float Glyph(int id, float2 p) {
     if (id == 10) {         // add a point: plus
         g = min(Seg(p, float2(-0.5, 0), float2(0.5, 0)), Seg(p, float2(0, -0.5), float2(0, 0.5))) - 0.12;
     }
+    if (id == 12 || id == 13) {   // lock / unlock: padlock, shackle closed or lifted open on the right
+        float body = max(Box(p, float2(0, -0.2), float2(0.36, 0.27)), -(length(p - float2(0, -0.17)) - 0.08));
+        float2 c = float2(0, id == 12 ? 0.07 : 0.2);
+        float2 q = p - c;
+        float arc = q.y >= 0 ? abs(length(q) - 0.22) : 1e3;
+        float legs = Seg(p, float2(-0.22, c.y), float2(-0.22, 0.07));
+        if (id == 12) legs = min(legs, Seg(p, float2(0.22, c.y), float2(0.22, 0.07)));
+        g = min(body, min(arc, legs) - 0.07);
+    }
+    if (id == 14) {         // snap upright: a post standing square on a base line, with a right-angle mark
+        float d = min(Seg(p, float2(-0.5, -0.4), float2(0.5, -0.4)), Seg(p, float2(0, -0.4), float2(0, 0.52)));
+        d = min(d, min(Seg(p, float2(0.2, -0.4), float2(0.2, -0.2)), Seg(p, float2(0.2, -0.2), float2(0, -0.2))));
+        g = d - 0.07;
+    }
     return g;
 }
 

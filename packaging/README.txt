@@ -1,4 +1,4 @@
-ALPHA VIEWS XR  v1.4.2
+ALPHA VIEWS XR  v1.4.3
 by GmoLargey  -  https://github.com/GmoLargey
 If you want to support me: https://ko-fi.com/virtuallyreal
 Free, open-source software under the GNU GPL version 3 (see LICENCE at the end).
@@ -70,17 +70,23 @@ cube back in front of you.
 Select a window by grabbing it. Its handles then appear, each with a symbol:
 
   Blue, four-way arrow (centre)   move, tilt and rotate the window
-  Orange, diagonal arrow (corner) resize. Shrink to tiny to delete
+  Orange, diagonal arrow (corner) resize. Shrink below 2 cm to delete
   Magenta curve (inside a corner) drag to round that corner
-  Green box (just right of the    pull towards you to make a box, deeper.
-  window, dotted link)            Push back flat for a flat window
+  Green box (right of the window, pull towards you to make a box, deeper.
+  dotted link)                    Push back flat for a flat window
   Solid box button (beside green) keep box on / off (white while on, section 7)
+  Padlock button (above, left)    lock the window's angle: moving it then never
+                                  tilts or turns it. Gold while locked
   Purple button (above)           rectangle <-> free shape (section 5)
   Teal ring button (above, beside purple)
                                   rectangle <-> circle. A circle can still be
                                   moved, resized (to an oval), made a box or a
                                   keep box
   Pencil button (above, shapes)   draw the shape's outline (section 5)
+  Blue upright button (above,     snap: square the window up, facing you. First
+  right)                          press stands a tilted window upright; each
+                                  further press: upright facing forward, upright
+                                  facing the side, lying level
 
 How you grab a handle depends on what you use: see the next three sections.
 
@@ -127,9 +133,9 @@ In edit mode:
 Laser (headsets without eye tracking): point at a handle or window and pull
 the trigger. A held window moves with the controller. While holding it:
   Thumbstick up / down       push it away / pull it closer
-  Thumbstick left / right    turn it
+  Thumbstick left / right    turn it (not while its angle is locked)
 To make a box with the laser, point at the green box handle, hold the trigger
-and use the thumbstick.
+and use the thumbstick. The deeper the box, the faster it grows.
 
 
 =============================================================================
@@ -189,6 +195,7 @@ whole box just shows as a plain cube of passthrough.
 Box: only the game's surfaces INSIDE the box show passthrough. For a wheel,
 pull the green box handle until the box just covers the rim and hub, not the
 dials behind. Keep the game's own wheel visible and lined up with your real one.
+Boxes can be as deep as you like (up to 100 m), e.g. a whole room.
 
 Keep box (the opposite): the box shows your room, but whatever the game draws
 inside it stays, e.g. a character standing in your room. Tap the solid box
@@ -266,7 +273,7 @@ log.txt (see FILES) says what happened in the last game.
 =============================================================================
 INSTALL, FILES, UNINSTALL
 =============================================================================
-Install: run AlphaViewsXR-Setup-1.4.2.exe (asks for admin), or for the zip,
+Install: run AlphaViewsXR-Setup-1.4.3.exe (asks for admin), or for the zip,
 extract it somewhere permanent and double-click Install.bat.
 
 Files, in %LOCALAPPDATA%\AlphaViewsXR:

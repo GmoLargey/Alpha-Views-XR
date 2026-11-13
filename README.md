@@ -17,10 +17,12 @@ the keyboard.
 
 - **Hand cutouts:** your tracked hands show as passthrough, tight to the hand.
 - **Windows:** place rectangles, circles or free shapes around your wheel, shifter, button box
-  or HOTAS. Move, tilt, resize and round the corners. Up to 32 per game, saved per game.
+  or HOTAS. Move, tilt, resize and round the corners. Lock a window's angle so it can't tilt
+  while you move it, or snap it upright or level with one button. Up to 32 per game, saved
+  per game.
 - **Depth boxes:** pull a window into a box, and only the game's surfaces *inside* the box turn
   to passthrough. Put one around your wheel to see your real wheel and hands, while the game's
-  dials behind it stay visible.
+  dials behind it stay visible. Boxes can be as deep as you like.
 - **Keep boxes:** the opposite. The box shows your room, but whatever the game draws inside it
   (a character, a cockpit display) stays.
 - **Hands behind objects:** game surfaces closer than your hand cover it.
