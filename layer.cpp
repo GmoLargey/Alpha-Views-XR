@@ -49,6 +49,13 @@
 //                          inverse of a box. The window shows passthrough, but the game's
 //                          surfaces inside the box (or in front of it) stay, e.g. a character
 //                          standing in it. Needs the game's depth.
+//     box faces (boxes only, past the keep button; its colour is the mode): which faces of the box
+//                          are passthrough, as in Alpha Views VR. Green: the whole box (as above).
+//                          Orange: top + far wall. Blue: far wall + floor. Purple: all but the front
+//                          and the floor. The chosen faces act as walls: a pixel is passthrough where
+//                          your view of the game crosses one, so game surfaces in front of a wall or
+//                          inside the box stay (keep doesn't apply). Without game depth the walls
+//                          are drawn as if the game were far away. Saved with the window.
 //     type (purple)        above the selected window: rounded rectangle <-> free shape (shows
 //                          the outline it switches to).
 //     lock (padlock, left of the purple button; gold while locked, grey while not): lock the
@@ -96,6 +103,21 @@
 //
 // Windows are saved per game in %LOCALAPPDATA%\AlphaViewsXR\.
 
+// Graphics: D3D11, D3D12 (Windows) and Vulkan (Windows and Linux, 1.5.0: render_vk.h). On Linux the
+// layer is Vulkan only; the guide panel's text is drawn with stb_truetype there (guide_font.h) instead
+// of GDI, and Ctrl+Alt hotkeys don't exist (everything is in the headset).
+#ifdef __linux__
+// The classic scanf / strtoul, not glibc 2.38's C23 versions, so the layer also loads on older distros.
+#include <features.h>
+#undef __GLIBC_USE_C2X_STRTOL
+#define __GLIBC_USE_C2X_STRTOL 0
+#undef __GLIBC_USE_C23_STRTOL
+#define __GLIBC_USE_C23_STRTOL 0
+#endif
+#define VK_NO_PROTOTYPES
+#include <vulkan/vulkan.h>
+#define XR_USE_GRAPHICS_API_VULKAN
+#ifdef _WIN32
 #define XR_USE_PLATFORM_WIN32
 #define XR_USE_GRAPHICS_API_D3D11
 #define XR_USE_GRAPHICS_API_D3D12
@@ -104,6 +126,24 @@
 #include <d3d11_1.h>
 #include <d3d12.h>
 #include <d3d11on12.h>
+#define PATH_SEP "\\"
+#define LAYER_EXPORT extern "C" __declspec(dllexport)
+#else
+#include <dlfcn.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+#include <cwchar>
+typedef uint32_t UINT;
+// The guide panel's few GDI types (guide_font.h draws it on Linux).
+struct RECT { int left, top, right, bottom; };
+typedef uint32_t COLORREF;
+#define RGB(r, g, b) ((COLORREF)(((r) & 255) | (((g) & 255) << 8) | (((b) & 255) << 16)))
+enum : UINT { DT_LEFT = 0, DT_CENTER = 1, DT_RIGHT = 2, DT_VCENTER = 4, DT_WORDBREAK = 0x10, DT_SINGLELINE = 0x20,
+              DT_END_ELLIPSIS = 0x8000 };
+#define PATH_SEP "/"
+#define LAYER_EXPORT extern "C" __attribute__((visibility("default")))
+#endif
 
 #include <DirectXMath.h>
 #include <openxr/openxr.h>
@@ -124,6 +164,21 @@
 #include <vector>
 
 using namespace DirectX;
+#ifndef _WIN32
+template <size_t N> static void strcpy_s(char (&d)[N], const char* s) { snprintf(d, N, "%s", s); }
+#define _countof(a) (sizeof(a) / sizeof((a)[0]))
+#endif
+#ifdef __linux__
+// The built-in C++ runtime (static libstdc++, built against a new glibc) asks for these two; our own
+// copies (hidden, linux/exports.map) let the layer load on glibc 2.35+ instead of 2.38+.
+#include <sys/random.h>
+extern "C" unsigned long __isoc23_strtoul(const char* s, char** end, int base) { return strtoul(s, end, base); }
+extern "C" uint32_t arc4random(void) {
+    uint32_t v = 0;
+    if (getrandom(&v, sizeof v, 0) != (ssize_t)sizeof v) { timespec t; clock_gettime(CLOCK_MONOTONIC, &t); v = (uint32_t)t.tv_nsec ^ (uint32_t)getpid(); }
+    return v;
+}
+#endif
 
 #define LAYER_NAME "XR_APILAYER_GMO_alpha_views_xr"
 
@@ -135,20 +190,58 @@ static void Log(const char* fmt, ...) {
     va_list a; va_start(a, fmt); vfprintf(g_log, fmt, a); va_end(a);
     fflush(g_log);
 }
+static bool FileExists(const std::string& p);
+static std::string EnvVar(const char* name);
+// Our folder: %LOCALAPPDATA%\AlphaViewsXR (Windows), $XDG_DATA_HOME/AlphaViewsXR or
+// ~/.local/share/AlphaViewsXR (Linux).
 static void InitDirAndLog() {
     if (g_log) return;
+#ifdef _WIN32
     char buf[MAX_PATH];
     DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", buf, MAX_PATH);
     g_dir = (n ? std::string(buf) : std::string(".")) + "\\AlphaViewsXR";
     CreateDirectoryA(g_dir.c_str(), nullptr);
-    g_log = fopen((g_dir + "\\log.txt").c_str(), "w");
+#else
+    const char* x = getenv("XDG_DATA_HOME");
+    const char* h = getenv("HOME");
+    std::string base = (x && *x) ? std::string(x) : (h && *h) ? std::string(h) + "/.local/share" : std::string(".");
+    mkdir(base.c_str(), 0755);
+    g_dir = base + "/AlphaViewsXR";
+    mkdir(g_dir.c_str(), 0755);
+#endif
+    // Dev / tests only: ALPHA_VIEWS_DIR=<folder> keeps everything (log, windows, settings) there instead.
+    std::string over = EnvVar("ALPHA_VIEWS_DIR");
+    if (!over.empty()) g_dir = over;
+    g_log = fopen((g_dir + PATH_SEP "log.txt").c_str(), "w");
 }
 
 static double Now() {
+#ifdef _WIN32
     static LARGE_INTEGER f{};
     if (!f.QuadPart) QueryPerformanceFrequency(&f);
     LARGE_INTEGER t; QueryPerformanceCounter(&t);
     return double(t.QuadPart) / double(f.QuadPart);
+#else
+    timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+    return double(t.tv_sec) + double(t.tv_nsec) * 1e-9;
+#endif
+}
+static bool FileExists(const std::string& p) {
+#ifdef _WIN32
+    return GetFileAttributesA(p.c_str()) != INVALID_FILE_ATTRIBUTES;
+#else
+    struct stat st; return stat(p.c_str(), &st) == 0;
+#endif
+}
+// Environment variable set (and not empty)? Its value, else "".
+static std::string EnvVar(const char* name) {
+#ifdef _WIN32
+    char v[256] = {};
+    DWORD n = GetEnvironmentVariableA(name, v, sizeof v);
+    return n && n < sizeof v ? std::string(v) : (n ? std::string("1") : std::string());
+#else
+    const char* v = getenv(name); return v ? std::string(v) : std::string();
+#endif
 }
 
 // ================================================================ next-layer functions
@@ -217,7 +310,14 @@ struct Window {
     // Lock (1.4.3): moving the window never changes its angle (no tilting while you push it about).
     // Only the snap button turns a locked window.
     bool lock = false;
+    // Box faces (1.5.0, as in Alpha Views VR): which faces of a box are passthrough. 0 the whole box
+    // (as before), 1 top + far wall, 2 far wall + floor, 3 all but the front and the floor. In modes
+    // 1-3 the faces are walls: the game's surfaces in front of them (or inside the box) stay.
+    int boxMode = 0;
 };
+static const char* kBoxModeName[4] = { "whole box", "top and far wall", "far wall and floor", "all but front and floor" };
+static const wchar_t* kBoxModeNameW[4] = { L"whole box", L"top + far wall", L"far wall + floor", L"all but front + floor" };
+static const float kBoxModeCol[4][3] = { { 0.1f, 0.55f, 0.25f }, { 0.95f, 0.55f, 0.1f }, { 0.1f, 0.6f, 0.9f }, { 0.6f, 0.3f, 0.95f } };
 // Box half depth limit: big enough for any box you'd want (a whole room or more), small enough to keep
 // the numbers sane. (Was 0.5 m, i.e. 1 m of total depth, before 1.4.3.)
 static const float kMaxHalfDepth = 50.0f;
@@ -442,16 +542,30 @@ static void MakeRect(Window& w) {
 }
 
 // ================================================================ state
+#ifdef _WIN32
 // Copy of one slice of a game depth image that our shader can read.
 struct DepthCopy { ID3D11Texture2D* tex = nullptr; ID3D11ShaderResourceView* srv = nullptr; bool failed = false; };
+#endif
+// A Vulkan game's swapchain (render_vk.h).
+struct VkSwapchainData {
+    std::vector<VkImage> images;
+    uint32_t width = 0, height = 0, layers = 1, samples = 1;
+    bool sampled = false;                      // depth: created with the SAMPLED usage bit (we added it)
+    bool failed = false;                       // depth: can't be read (logged once)
+    std::map<uint64_t, VkImageView> views;     // key: image index << 32 | array slice
+    std::map<uint64_t, VkFramebuffer> fbs;     // colour: same key
+};
 
 struct SwapchainInfo {
-    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    int64_t format = 0;                        // DXGI_FORMAT (D3D) or VkFormat (Vulkan)
+#ifdef _WIN32
     std::vector<ID3D11Texture2D*> images;   // D3D12 games: our wrapped copies (we own them)
     std::map<uint64_t, ID3D11RenderTargetView*> rtvs; // key: image index << 32 | array slice
+    std::map<uint32_t, DepthCopy> depthCopies; // key: array slice
+#endif
     uint32_t lastAcquired = 0;
     bool depth = false;                       // a game depth swapchain (read only)
-    std::map<uint32_t, DepthCopy> depthCopies; // key: array slice
+    VkSwapchainData vk;
 };
 
 // Sphere instance (hand cutouts), or an edit-mode handle disc (vsIcon / psIcon in shaders.hlsl).
@@ -464,7 +578,7 @@ struct Inst {
     float gr = 0, gg = 0, gb = 0, ga = 0;
 };
 enum IconId { ICON_DOT, ICON_MOVE, ICON_RESIZE, ICON_ROUND, ICON_DEPTH, ICON_KEEP, ICON_TO_SHAPE, ICON_TO_RECT,
-              ICON_DRAW, ICON_POINT, ICON_ADD, ICON_TO_CIRCLE, ICON_LOCK, ICON_UNLOCK, ICON_SNAP };
+              ICON_DRAW, ICON_POINT, ICON_ADD, ICON_TO_CIRCLE, ICON_LOCK, ICON_UNLOCK, ICON_SNAP, ICON_FACES };
 
 // CPU copy of Glyph() in shaders.hlsl, for the guide panel's legend. Keep them in step.
 namespace glyph {
@@ -548,6 +662,15 @@ static float Glyph(int id, P p) {
         d = min(d, min(Seg(p, { 0.2f, -0.4f }, { 0.2f, -0.2f }), Seg(p, { 0.2f, -0.2f }, { 0, -0.2f })));
         return d - 0.07f;
     }
+    if (id == ICON_FACES) {
+        // Box faces: a box with a solid far wall behind its open front.
+        float front = Box(p, { -0.12f, -0.12f }, { 0.3f, 0.3f });
+        float back = max(Box(p, { 0.12f, 0.12f }, { 0.3f, 0.3f }), -(front - 0.03f));
+        float d = fabsf(front) - 0.065f;
+        d = min(d, Seg(p, { -0.42f, 0.18f }, { -0.18f, 0.42f }) - 0.065f);
+        d = min(d, Seg(p, { 0.18f, -0.42f }, { 0.42f, -0.18f }) - 0.065f);
+        return min(d, back);
+    }
     return 1e3f;
 }
 }  // namespace glyph
@@ -561,7 +684,8 @@ enum GrabMode { GRAB_NONE, GRAB_MOVE, GRAB_CORNER, GRAB_RADIUS, GRAB_DEPTH,
                 GRAB_SNAPBTN,    // snap button above the window: stand it upright / lay it level (cycles)
                 GRAB_GUIDE,      // the guide panel: move it
                 GRAB_ALL,        // the guide's "move all windows" button: all windows move together
-                GRAB_PRESET };   // a guide preset button (corner = preset 0..2): tap loads, hold saves
+                GRAB_PRESET,     // a guide preset button (corner = preset 0..2): tap loads, hold saves
+                GRAB_FACESBTN }; // box faces button, past the keep button (boxes only): next face mode
 
 // What a ray (eye gaze or controller laser) is on: a dot of the selected window, or a window.
 struct GazeTarget { GrabMode mode = GRAB_NONE; int win = -1, corner = -1; };
@@ -777,6 +901,8 @@ static std::vector<BoxDraw> g_boxDraws; // one triangle range per box window
 static const UINT kMaxInst = 8192;   // half for cutouts, half for edit-mode UI
 static const UINT kMaxWinVerts = 32768;   // window triangles: 32 round boxes (576 each) fit easily
 
+static UINT g_sphereIndexCount = 0;
+#ifdef _WIN32
 // D3D11 resources
 static ID3D11Device1* g_dev = nullptr;
 static ID3D11DeviceContext1* g_ctx = nullptr;
@@ -813,13 +939,16 @@ static ID3D11Buffer* g_winVB = nullptr;
 static ID3D11Buffer* g_sphereVB = nullptr;
 static ID3D11Buffer* g_sphereIB = nullptr;
 static ID3D11Buffer* g_instVB = nullptr;
-static UINT g_sphereIndexCount = 0;
 static ID3D11BlendState* g_bsAlphaOnly = nullptr;
 static ID3D11BlendState* g_bsAll = nullptr;
 static ID3D11RasterizerState* g_rs = nullptr;
 static ID3D11DepthStencilState* g_dss = nullptr;
 
 template <class T> static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
+#endif
+#ifndef _WIN32
+static const bool g_on12 = false;   // D3D12 (Windows only)
+#endif
 
 static void ReleaseHands() {
     for (auto& h : g_hand) {
@@ -837,6 +966,7 @@ static void ReleaseActions() {
     g_ctl.attached = false;
 }
 
+#ifdef _WIN32
 static void ReleaseSwapchainInfo(SwapchainInfo& info) {
     for (auto& [k, rtv] : info.rtvs) if (rtv) rtv->Release();
     info.rtvs.clear();
@@ -863,19 +993,22 @@ static void ReleaseD3D() {
     SafeRelease(g_psBox); SafeRelease(g_psColor); SafeRelease(g_psConst); SafeRelease(g_vsSphere); SafeRelease(g_vsMesh); SafeRelease(g_vsFull);
     SafeRelease(g_state); SafeRelease(g_ctx); SafeRelease(g_dev);
 }
+#else
+static void ReleaseD3D() {}
+#endif
 
 // ================================================================ config
 static std::string ConfigPath() {
     std::string n = g_appName;
     for (char& c : n) if (!isalnum((unsigned char)c)) c = '_';
-    return g_dir + "\\windows_" + n + ".cfg";
+    return g_dir + PATH_SEP "windows_" + n + ".cfg";
 }
 // Hands behind game objects (Ctrl+Alt+O): game surfaces closer than your hand cover it.
 static bool g_handOcclude = true;   // on by default
 static int g_handDepthUsed = -1;   // last frame: 1 = hands tested against game depth, 0 = no depth to test, -1 = off
 
 static void LoadSettings() {
-    FILE* f = fopen((g_dir + "\\settings.cfg").c_str(), "r");
+    FILE* f = fopen((g_dir + PATH_SEP "settings.cfg").c_str(), "r");
     if (!f) return;
     float s;
     int hands;
@@ -892,7 +1025,7 @@ static void LoadSettings() {
     fclose(f);
 }
 static void SaveSettings() {
-    FILE* f = fopen((g_dir + "\\settings.cfg").c_str(), "w");
+    FILE* f = fopen((g_dir + PATH_SEP "settings.cfg").c_str(), "w");
     if (!f) return;
     fprintf(f, "%f %d %d %d %d %d\n", g_handScale, g_handsEnabled ? 1 : 0, g_d3d12Enabled ? 1 : 0, g_forceAlpha ? 1 : 0,
             g_guideOn ? 1 : 0, g_handOcclude ? 1 : 0);
@@ -900,6 +1033,9 @@ static void SaveSettings() {
 }
 // Is Virtual Desktop's streamer running? Then SteamVR's frames reach the Quest through VD too.
 static bool VirtualDesktopRunning() {
+#ifndef _WIN32
+    return false;
+#else
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return false;
     PROCESSENTRY32W pe{ sizeof pe };
@@ -908,6 +1044,7 @@ static bool VirtualDesktopRunning() {
         found = _wcsicmp(pe.szExeFile, L"VirtualDesktop.Streamer.exe") == 0;
     CloseHandle(snap);
     return found;
+#endif
 }
 static bool g_viaVD = false;   // SteamVR runtime, streamed by Virtual Desktop
 // Key colour mode, saved per runtime (key_<runtime>.cfg). SteamVR through Virtual Desktop shares
@@ -915,7 +1052,7 @@ static bool g_viaVD = false;   // SteamVR runtime, streamed by Virtual Desktop
 static std::string KeyModePath() {
     std::string n = g_viaVD ? std::string("VirtualDesktopXR") : g_runtimeName;
     for (char& c : n) if (!isalnum((unsigned char)c)) c = '_';
-    return g_dir + "\\key_" + n + ".cfg";
+    return g_dir + PATH_SEP "key_" + n + ".cfg";
 }
 static void LoadKeyMode() {
     g_keyMode = 0;
@@ -977,7 +1114,12 @@ static bool ReadWindows(const std::string& path, bool* enabled) {
                 if (sscanf(c, "%d%n", &ell, &adv) == 1) {
                     w.ellipse = ell != 0 && !IsShape(w);
                     c += adv;
-                    if (sscanf(c, "%d", &lock) == 1) w.lock = lock != 0;
+                    if (sscanf(c, "%d%n", &lock, &adv) == 1) {
+                        w.lock = lock != 0;
+                        c += adv;
+                        int bm = 0;   // then the box face mode (1.5.0)
+                        if (sscanf(c, "%d", &bm) == 1) w.boxMode = std::clamp(bm, 0, 3);
+                    }
                 }
             }
             ws.push_back(w);
@@ -993,7 +1135,7 @@ static std::string PresetPath(int i) {
     return p.substr(0, p.size() - 4) + "_preset" + std::to_string(i + 1) + ".cfg";
 }
 static void CheckPresets() {
-    for (int i = 0; i < 3; ++i) g_presetHas[i] = GetFileAttributesA(PresetPath(i).c_str()) != INVALID_FILE_ATTRIBUTES;
+    for (int i = 0; i < 3; ++i) g_presetHas[i] = FileExists(PresetPath(i));
 }
 static void LoadWindows() {
     g_windows.clear();
@@ -1013,7 +1155,7 @@ static bool WriteWindows(const std::string& path) {
             w.rot.x, w.rot.y, w.rot.z, w.rot.w, w.hw, w.hh, w.radius[0], w.radius[1], w.radius[2], w.radius[3],
             0, 0, 0, 0, w.hd, IsShape(w) ? (int)w.pts.size() : 0);
         if (IsShape(w)) for (auto& p : w.pts) fprintf(f, " %f %f", p.x, p.y);
-        fprintf(f, " %d %d %d\n", w.keep ? 1 : 0, w.ellipse ? 1 : 0, w.lock ? 1 : 0);
+        fprintf(f, " %d %d %d %d\n", w.keep ? 1 : 0, w.ellipse ? 1 : 0, w.lock ? 1 : 0, w.boxMode);
     }
     fclose(f);
     return true;
@@ -1044,6 +1186,7 @@ static void LoadPreset(int i, const char* why) {
 
 // ================================================================ D3D setup
 // Precompiled shader bytecode (shaders.hlsl, built by fxc), so no runtime shader compiler is needed.
+#ifdef _WIN32
 #include "vsFull.h"
 #include "vsMesh.h"
 #include "vsSphere.h"
@@ -1056,6 +1199,7 @@ static void LoadPreset(int i, const char* why) {
 #include "psHandD.h"
 #include "vsIcon.h"
 #include "psIcon.h"
+#endif
 
 struct CB { XMFLOAT4X4 mvp; XMFLOAT4 col, camR, camU; };   // must match cbuffer C in shaders.hlsl
 // Must match cbuffer B in shaders.hlsl.
@@ -1075,6 +1219,25 @@ struct WinGPU {
 struct CBWin { XMFLOAT4 count; WinGPU win[kMaxWindows]; };
 static_assert(sizeof(WinGPU) % 16 == 0 && sizeof(CBWin) % 16 == 0, "cbuffer W layout");
 
+// Low-poly unit sphere (hand cutouts): positions (x y z) and triangle indices.
+static void MakeSphere(std::vector<float>& sv, std::vector<uint16_t>& si) {
+    const int rings = 8, segs = 12;
+    for (int i = 0; i <= rings; ++i) {
+        float th = XM_PI * i / rings;
+        for (int j = 0; j < segs; ++j) {
+            float ph = XM_2PI * j / segs;
+            sv.push_back(sinf(th) * cosf(ph)); sv.push_back(cosf(th)); sv.push_back(sinf(th) * sinf(ph));
+        }
+    }
+    for (int i = 0; i < rings; ++i)
+        for (int j = 0; j < segs; ++j) {
+            uint16_t a = uint16_t(i * segs + j), b = uint16_t(i * segs + (j + 1) % segs);
+            uint16_t c = uint16_t((i + 1) * segs + j), d = uint16_t((i + 1) * segs + (j + 1) % segs);
+            si.insert(si.end(), { a, c, b, b, c, d });
+        }
+}
+
+#ifdef _WIN32
 static bool InitD3D(ID3D11Device* device) {
     if (FAILED(device->QueryInterface(__uuidof(ID3D11Device1), (void**)&g_dev))) { Log("No ID3D11Device1\n"); return false; }
     g_dev->GetImmediateContext1(&g_ctx);
@@ -1150,22 +1313,9 @@ static bool InitD3D(ID3D11Device* device) {
 
     // Low-poly unit sphere.
     {
-        const int rings = 8, segs = 12;
         std::vector<float> sv;
         std::vector<uint16_t> si;
-        for (int i = 0; i <= rings; ++i) {
-            float th = XM_PI * i / rings;
-            for (int j = 0; j < segs; ++j) {
-                float ph = XM_2PI * j / segs;
-                sv.push_back(sinf(th) * cosf(ph)); sv.push_back(cosf(th)); sv.push_back(sinf(th) * sinf(ph));
-            }
-        }
-        for (int i = 0; i < rings; ++i)
-            for (int j = 0; j < segs; ++j) {
-                uint16_t a = uint16_t(i * segs + j), b = uint16_t(i * segs + (j + 1) % segs);
-                uint16_t c = uint16_t((i + 1) * segs + j), d = uint16_t((i + 1) * segs + (j + 1) % segs);
-                si.insert(si.end(), { a, c, b, b, c, d });
-            }
+        MakeSphere(sv, si);
         g_sphereIndexCount = (UINT)si.size();
         D3D11_BUFFER_DESC b{ UINT(sv.size() * 4), D3D11_USAGE_IMMUTABLE, D3D11_BIND_VERTEX_BUFFER };
         D3D11_SUBRESOURCE_DATA s{ sv.data() };
@@ -1208,12 +1358,14 @@ static bool InitD3D(ID3D11Device* device) {
     return g_vsFull && g_vsMesh && g_vsSphere && g_psConst && g_psColor && g_psBox && g_cbBox && g_cbWin && g_ilMesh && g_ilSphere && g_cb &&
            g_winVB && g_sphereVB && g_sphereIB && g_instVB && g_bsAlphaOnly && g_bsAll && g_rs && g_dss;
 }
+#endif
 
 // ================================================================ hotkeys
 // Ctrl+Alt shortcuts, registered with Windows (RegisterHotKey) by a small thread of our own that
 // waits for them. Only these key combinations ever reach the layer: it doesn't read the keyboard.
 enum HotkeyId { HK_E, HK_P, HK_J, HK_V, HK_X, HK_N, HK_G, HK_C, HK_O, HK_MINUS, HK_PLUS, HK_SHALLOW, HK_DEEP,
                 HK_D, HK_K, HK_1, HK_2, HK_3, HK_S1, HK_S2, HK_S3, HK_COUNT };
+#ifdef _WIN32
 // HK_S1..3 are Ctrl+Alt+Shift+1..3 (save a preset); the rest are Ctrl+Alt+key.
 static const UINT kHotkeyVk[HK_COUNT] = { 'E', 'P', 'J', 'V', 'X', 'N', 'G', 'C', 'O', VK_OEM_MINUS, VK_OEM_PLUS,
                                           VK_OEM_4, VK_OEM_6, 'D', 'K', '1', '2', '3', '1', '2', '3' };
@@ -1257,6 +1409,12 @@ static void StopHotkeys() {
     g_hotkeyThread = nullptr; g_hotkeyThreadId = 0;
     g_hotkeyHits = 0; g_hotkeyFailed = -1; g_hotkeyLogged = false;
 }
+#else
+// Linux: no Ctrl+Alt shortcuts (a layer can't watch the keyboard there); everything is in the headset.
+static std::atomic<uint32_t> g_hotkeyHits{ 0 };
+static void StartHotkeys() {}
+static void StopHotkeys() {}
+#endif
 // True once per press of Ctrl+Alt+<key>.
 static bool Pressed(HotkeyId k) { return (g_hotkeyHits.fetch_and(~(1u << k)) & (1u << k)) != 0; }
 static void SetEdit(bool on, const char* why) {
@@ -1269,6 +1427,11 @@ static void SetEdit(bool on, const char* why) {
         SaveWindows();
     }
 }
+#ifdef _WIN32
+#define KEY_COLOUR_HOW "Ctrl+Alt+C (or a V sign / thumbstick press in edit mode)"
+#else
+#define KEY_COLOUR_HOW "a V sign or thumbstick press in edit mode"
+#endif
 // Next cutout colour: alpha -> green -> blue -> pink (Ctrl+Alt+C, V sign, thumbstick press).
 static void CycleKeyMode(const char* why) {
     g_keyMode = (g_keyMode + 1) % 4;
@@ -1296,6 +1459,11 @@ static void HandleKeys() {
         SaveSettings();
     }
     if (kE) SetEdit(!g_edit, "hotkey");
+    // Dev / tests only: ALPHA_VIEWS_EDIT=<frames> turns edit mode on after that many frames.
+    {
+        static int editAfter = atoi(EnvVar("ALPHA_VIEWS_EDIT").c_str()), frame = 0;
+        if (editAfter > 0 && ++frame == editAfter) SetEdit(true, "ALPHA_VIEWS_EDIT");
+    }
     if (kN) g_spawnAhead = true;
     if (kG) { g_guideOn = !g_guideOn; Log("Edit-mode guide %s\n", g_guideOn ? "on" : "off"); SaveSettings(); }
     if (kP) { g_windowsEnabled = !g_windowsEnabled; Log("Windows %s\n", g_windowsEnabled ? "on" : "off"); SaveWindows(); }
@@ -1326,7 +1494,9 @@ static void HandleD3D12Key() {
     g_d3d12Enabled = !g_d3d12Enabled;
     Log("Experimental D3D12 support %s. Restart the game for it to take effect.\n", g_d3d12Enabled ? "ON" : "OFF");
     SaveSettings();
+#ifdef _WIN32
     MessageBeep(g_d3d12Enabled ? MB_OK : MB_ICONHAND);
+#endif
 }
 // Ctrl+Alt+K: force alpha. For runtimes that don't offer ALPHA_BLEND but can still pass alpha on
 // (test option). Takes effect straight away.
@@ -1335,7 +1505,9 @@ static void HandleForceAlphaKey() {
     g_forceAlpha = !g_forceAlpha;
     Log("Force alpha %s.\n", g_forceAlpha ? "ON: cutouts transparent, layer alpha flags set (game's blend mode kept)" : "OFF");
     SaveSettings();
+#ifdef _WIN32
     MessageBeep(g_forceAlpha ? MB_OK : MB_ICONHAND);
+#endif
 }
 
 // ================================================================ hand analysis
@@ -1450,6 +1622,7 @@ static XMFLOAT2 CircleButtonLocal(const Window& w) { return TopButton(w, 0.03f);
 static XMFLOAT2 SnapButtonLocal(const Window& w) { return TopButton(w, 0.09f); }
 // Keep-box button (solid box): just outside the depth handle, on the centre line too.
 static XMVECTOR KeepButton(const Window& w) { return WinToWorld(w, w.hw + (kDepthOut + 0.042f) * SpreadSide(w), 0, 0); }
+static XMVECTOR FacesButton(const Window& w) { return WinToWorld(w, w.hw + (kDepthOut + 0.084f) * SpreadSide(w), 0, 0); }
 static XMFLOAT2 MidLocal(const Window& w, int k) {
     const XMFLOAT2 &a = w.pts[k], &b = w.pts[(k + 1) % w.pts.size()];
     return { (a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f };
@@ -1465,6 +1638,7 @@ static XMVECTOR TargetPoint(const Window& w, GrabMode mode, int corner) {
     if (mode == GRAB_RADIUS) { XMFLOAT2 rh = RadiusHandleLocal(w, corner); return WinToWorld(w, rh.x, rh.y); }
     if (mode == GRAB_DEPTH) return DepthHandle(w);
     if (mode == GRAB_KEEPBTN) return KeepButton(w);
+    if (mode == GRAB_FACESBTN) return FacesButton(w);
     if (mode == GRAB_CIRCLEBTN) { XMFLOAT2 b = CircleButtonLocal(w); return WinToWorld(w, b.x, b.y); }
     if (mode == GRAB_LOCKBTN) { XMFLOAT2 b = LockButtonLocal(w); return WinToWorld(w, b.x, b.y); }
     if (mode == GRAB_SNAPBTN) { XMFLOAT2 b = SnapButtonLocal(w); return WinToWorld(w, b.x, b.y); }
@@ -1540,6 +1714,7 @@ static GazeTarget RayTarget(XMVECTOR o, XMVECTOR d, float maxDeg, float* len) {
         consider(GRAB_TYPE, -1);
         consider(GRAB_DEPTH, -1);
         consider(GRAB_KEEPBTN, -1);
+        if (w.hd > 0) consider(GRAB_FACESBTN, -1);
         if (!IsShape(w)) consider(GRAB_CIRCLEBTN, -1);
         consider(GRAB_LOCKBTN, -1);
         consider(GRAB_SNAPBTN, -1);
@@ -1626,7 +1801,7 @@ static const char* GrabName(GrabMode m) {
     case GRAB_DEPTH: return "depth"; case GRAB_POINT: return "shape point"; case GRAB_ADDPT: return "add point";
     case GRAB_TYPE: return "type button"; case GRAB_DRAWBTN: return "draw button"; case GRAB_TRACE: return "trace";
     case GRAB_KEEPBTN: return "keep-box button"; case GRAB_CIRCLEBTN: return "circle button";
-    case GRAB_LOCKBTN: return "lock button"; case GRAB_SNAPBTN: return "snap button";
+    case GRAB_LOCKBTN: return "lock button"; case GRAB_SNAPBTN: return "snap button"; case GRAB_FACESBTN: return "box faces button";
     case GRAB_GUIDE: return "guide panel"; case GRAB_ALL: return "all windows"; case GRAB_PRESET: return "preset button";
     default: return "none";
     }
@@ -1659,6 +1834,14 @@ static void ToggleKeep(int wi) {
     w.keep = !w.keep;
     Log("Window %d is now a %s\n", wi, w.keep ? "keep box (passthrough, but the game's surfaces inside the box stay)"
                                                 : "normal window (the game inside it turns into passthrough)");
+    SaveWindows();
+}
+
+// Box faces button: the next face mode (which faces of the box are passthrough).
+static void CycleBoxMode(int wi) {
+    Window& w = g_windows[wi];
+    w.boxMode = (w.boxMode + 1) % 4;
+    Log("Window %d box faces: %s\n", wi, kBoxModeName[w.boxMode]);
     SaveWindows();
 }
 
@@ -1862,6 +2045,7 @@ static void BeginGrab(HandState& h) {
         }
         at(GRAB_TYPE, -1, kButtonHit);
         at(GRAB_KEEPBTN, -1, kButtonHit);
+        if (w.hd > 0) at(GRAB_FACESBTN, -1, kButtonHit);
         if (!IsShape(w)) at(GRAB_CIRCLEBTN, -1, kButtonHit);
         at(GRAB_LOCKBTN, -1, kButtonHit);
         at(GRAB_SNAPBTN, -1, kButtonHit);
@@ -1903,6 +2087,7 @@ static void BeginGrab(HandState& h) {
     // Buttons act on the pinch. An edge dot becomes a new point, grabbed straight away.
     if (h.mode == GRAB_TYPE && h.win >= 0) ToggleShape(h.win);
     if (h.mode == GRAB_KEEPBTN && h.win >= 0) ToggleKeep(h.win);
+    if (h.mode == GRAB_FACESBTN && h.win >= 0) CycleBoxMode(h.win);
     if (h.mode == GRAB_CIRCLEBTN && h.win >= 0) ToggleCircle(h.win);
     if (h.mode == GRAB_LOCKBTN && h.win >= 0) ToggleLock(h.win);
     if (h.mode == GRAB_SNAPBTN && h.win >= 0) SnapWindow(h.win);
@@ -2143,14 +2328,34 @@ static void EndGrab(HandState& h, double now) {
 
 static std::wstring Widen(const std::string& s) {
     if (s.empty()) return {};
+#ifdef _WIN32
     int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
     std::wstring w(n, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], n);
     return w;
+#else   // UTF-8 -> UTF-32 (wchar_t is 32 bits)
+    std::wstring w;
+    for (size_t i = 0; i < s.size();) {
+        unsigned char c = (unsigned char)s[i];
+        int len = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 1;
+        uint32_t cp = len == 1 ? c : c & (0x3F >> (len - 1));
+        for (int k = 1; k < len && i + k < s.size(); ++k) cp = (cp << 6) | ((unsigned char)s[i + k] & 0x3F);
+        w += (wchar_t)cp;
+        i += len;
+    }
+    return w;
+#endif
 }
+// Wide strings: %ls for a wchar_t* (on both compilers).
 static std::wstring Fmt(const wchar_t* f, ...) {
     wchar_t b[512];
-    va_list a; va_start(a, f); _vsnwprintf_s(b, _countof(b), _TRUNCATE, f, a); va_end(a);
+    va_list a; va_start(a, f);
+#ifdef _WIN32
+    _vsnwprintf_s(b, _countof(b), _TRUNCATE, f, a);
+#else
+    if (vswprintf(b, _countof(b), f, a) < 0) b[_countof(b) - 1] = 0;
+#endif
+    va_end(a);
     return b;
 }
 // A distance in short words: "55 cm", "2.4 m", "infinite".
@@ -2206,16 +2411,19 @@ static void GuideContent(GuideData& g) {
         const Window& w = g_windows[g_selected];
         g.win.push_back({ 0, Fmt(L"Window %d of %d", g_selected + 1, (int)g_windows.size()) });
         g.win.push_back({ 0, Fmt(L"Size: %.0f x %.0f cm", w.hw * 200, w.hh * 200) });
-        std::wstring t = w.keep ? (w.hd > 0 ? Fmt(L"keep box, %.0f cm deep", w.hd * 200) : std::wstring(L"keep, flat"))
-                                : (w.hd > 0 ? Fmt(L"box, %.0f cm deep", w.hd * 200) : std::wstring(L"flat"));
+        // A box with a face mode is passthrough on its chosen faces only (keep doesn't apply then).
+        bool faces = w.hd > 0 && w.boxMode > 0;
+        std::wstring t = w.keep && !faces ? (w.hd > 0 ? Fmt(L"keep box, %.0f cm deep", w.hd * 200) : std::wstring(L"keep, flat"))
+                                          : (w.hd > 0 ? Fmt(L"box, %.0f cm deep", w.hd * 200) : std::wstring(L"flat"));
         if (IsShape(w)) t += L", free shape";
         else if (w.ellipse) t += L", circle";
         g.win.push_back({ 0, L"Type: " + t });
+        if (w.hd > 0) g.win.push_back({ 0, std::wstring(L"Box faces: ") + kBoxModeNameW[std::clamp(w.boxMode, 0, 3)] });
         g.win.push_back({ 0, L"Distance: " + ShortDist(Dist(g_head, V(w.pos))) });
     } else if (g_windows.empty()) {
         g.win.push_back({ 2, L"No windows yet" });
     } else {
-        g.win.push_back({ 2, Fmt(L"None selected (%d window%s)", (int)g_windows.size(), g_windows.size() > 1 ? L"s" : L"") });
+        g.win.push_back({ 2, Fmt(L"None selected (%d window%ls)", (int)g_windows.size(), g_windows.size() > 1 ? L"s" : L"") });
     }
     if (g_drawArmed >= 0) g.win.push_back({ 1, L"Drawing: pinch and trace, let go to finish" });
     if (Now() < g_windowsFullUntil)
@@ -2249,6 +2457,10 @@ static void GuideContent(GuideData& g) {
                                                        : GuideNote{ 0, L"Hands behind objects: on" });
     else g.status.push_back({ 2, L"Hands behind objects: off" });
 }
+
+#ifndef _WIN32
+#include "guide_font.h"
+#endif
 
 // A handle symbol for the guide's legend, painted like psIcon (shaders.hlsl) into BGRA pixels.
 struct LegendIcon { IconId id; float c[3]; float g[3]; bool ownGlyphCol; float angle; const wchar_t* word; };
@@ -2293,6 +2505,7 @@ static void RenderGuide() {
     if (key == g_guideText && !g_guidePixels.empty()) return;
     g_guideText = key;
 
+#ifdef _WIN32
     static HDC dc = nullptr, iconDc = nullptr;
     static void* bits = nullptr;
     static HFONT fTitle, fHead, fAction, fHow, fNote, fKey;
@@ -2333,12 +2546,45 @@ static void RenderGuide() {
         DrawTextW(dc, s.c_str(), -1, &r, DT_LEFT | DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
         return (int)(r.bottom - r.top);
     };
+    auto width = [&](const std::wstring& s, HFONT f) {
+        SelectObject(dc, f);
+        RECT need{ 0, 0, 400, 40 }; DrawTextW(dc, s.c_str(), -1, &need, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+        return (int)need.right;
+    };
+    auto picture = [&](const wchar_t* name, RECT r) {
+        HBITMAP ib = mod ? (HBITMAP)LoadImageW(mod, name, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION) : nullptr;
+        if (!ib) return;
+        BITMAP bm{}; GetObject(ib, sizeof bm, &bm);
+        HGDIOBJ old = SelectObject(iconDc, ib);
+        StretchBlt(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, iconDc, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+        SelectObject(iconDc, old);
+        DeleteObject(ib);
+    };
+    const bool keyboard = true;
+#else
+    static GuideCanvas cv;
+    static GuideFont ft[6];
+    static bool fontsOk = false;
+    if (cv.px.empty()) {
+        cv.W = kGuideW; cv.H = kGuideH; cv.px.assign((size_t)kGuideW * kGuideH, 0xFF000000u);
+        fontsOk = ft[0].Init(2, 40) && ft[1].Init(2, 32) && ft[2].Init(1, 33) && ft[3].Init(0, 25) && ft[4].Init(0, 26) && ft[5].Init(2, 26);
+        if (!fontsOk) Log("Guide: no font found (install fonts-dejavu or similar): the panel has no text.\n");
+    }
+    GuideFont *fTitle = &ft[0], *fHead = &ft[1], *fAction = &ft[2], *fHow = &ft[3], *fNote = &ft[4], *fKey = &ft[5];
+    auto fill = [&](RECT r, COLORREF c) { cv.Fill(r, c); };
+    auto shape = [&](RECT r, int rad, COLORREF c) { cv.Shape(r, rad, c); };
+    auto text = [&](const std::wstring& s, GuideFont* f, COLORREF c, RECT r, UINT flags) { cv.Text(s, f, c, r, flags); };
+    auto height = [&](const std::wstring& s, GuideFont* f, RECT r) { return GuideCanvas::Height(s, f, r); };
+    auto width = [&](const std::wstring& s, GuideFont* f) { return (int)ceilf(GuideCanvas::Measure(s, f)); };
+    auto picture = [&](const wchar_t* name, RECT r) { cv.Picture(name, r); };
+    const bool keyboard = false;   // no Ctrl+Alt shortcuts on Linux
+#endif
     const COLORREF cHead = RGB(110, 230, 170), cText = RGB(232, 236, 242), cDim = RGB(150, 158, 170),
                    cWarn = RGB(255, 170, 90), cLine = RGB(52, 58, 68);
     fill({ 0, 0, kGuideW, kGuideH }, RGB(22, 25, 31));
     fill({ 0, 0, kGuideW, kGuideHeader }, RGB(30, 70, 60));
     text(L"EDIT MODE", fTitle, RGB(235, 255, 245), { 40, 0, kGuideW - 40, kGuideHeader }, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-    text(L"Grab the panel to move it  ·  Ctrl+Alt+G hides it", fHow, RGB(170, 210, 195), { 40, 0, kGuideW - 40, kGuideHeader }, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    text(keyboard ? L"Grab the panel to move it  ·  Ctrl+Alt+G hides it" : L"Grab the panel to move it", fHow, RGB(170, 210, 195), { 40, 0, kGuideW - 40, kGuideHeader }, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
     // "Move all windows" button: hold it (pinch, trigger) and move your hand; every window follows.
     {
         const COLORREF bg = g_guideBtnState == 2 ? RGB(40, 150, 255) : g_guideBtnState == 1 ? RGB(60, 110, 170) : RGB(42, 58, 82);
@@ -2382,24 +2628,17 @@ static void RenderGuide() {
         for (size_t i = 0; i < rows.size(); ++i) {
             int y = top + (int)i * rowH;
             shape({ x0, y, x0 + tile, y + tile }, 22, RGB(255, 255, 255));
-            HBITMAP ib = mod ? (HBITMAP)LoadImageW(mod, rows[i].icon, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION) : nullptr;
-            if (ib) {
-                BITMAP bm{}; GetObject(ib, sizeof bm, &bm);
-                HGDIOBJ old = SelectObject(iconDc, ib);
-                StretchBlt(dc, x0 + 6, y + 6, tile - 12, tile - 12, iconDc, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
-                SelectObject(iconDc, old);
-                DeleteObject(ib);
-            }
+            picture(rows[i].icon, { x0 + 6, y + 6, x0 + tile - 6, y + tile - 6 });
             int tx = x0 + tile + 22;
             text(rows[i].action, fAction, RGB(240, 244, 250), { tx, y + 10, xr, y + 54 }, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
             text(rows[i].how, fHow, RGB(160, 170, 182), { tx, y + 54, xr, y + rowH - 4 }, DT_LEFT | DT_WORDBREAK);
         }
     };
     column(L"HANDS", g.hands, x1, x2 - 40);
-    column(L"CONTROLLERS", g.ctl, x2, x3 - 40);
-    text(L"KEYBOARD", fHead, cHead, { x3, 126, xEnd, 172 }, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-    text(L"hold Ctrl+Alt, then", fHow, cDim, { x3 + 190, 126, xEnd, 172 }, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-    {
+    column(L"CONTROLLERS", g.ctl, x2, keyboard ? x3 - 40 : xEnd);
+    if (keyboard) {
+        text(L"KEYBOARD", fHead, cHead, { x3, 126, xEnd, 172 }, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        text(L"hold Ctrl+Alt, then", fHow, cDim, { x3 + 190, 126, xEnd, 172 }, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         const int n = (int)_countof(kGuideKeys), kh = (rowsBottom - top) / n;
         for (int i = 0; i < n; ++i) {
             int y = top + i * kh;
@@ -2408,7 +2647,7 @@ static void RenderGuide() {
             text(kGuideKeys[i].action, fNote, cText, { x3 + 96, y, xEnd, y + kh - 4 }, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
         }
     }
-    for (int x : { x2 - 22, x3 - 22 }) fill({ x, 138, x + 3, rowsBottom }, cLine);
+    for (int x : { x2 - 22, x3 - 22 }) if (keyboard || x == x2 - 22) fill({ x, 138, x + 3, rowsBottom }, cLine);
 
     // Handle symbols: one word each (the symbols are painted in after GDI, below).
     int y = rowsBottom + 14;
@@ -2420,6 +2659,7 @@ static void RenderGuide() {
         { ICON_ROUND, { 1, 0.2f, 1 }, {}, false, 0, L"round" },
         { ICON_DEPTH, { 0.1f, 0.68f, 0.22f }, {}, false, 0, L"box" },
         { ICON_KEEP, { 0.95f, 0.95f, 0.95f }, { 0.1f, 0.68f, 0.22f }, true, 0, L"keep box" },
+        { ICON_FACES, { 0.95f, 0.55f, 0.1f }, {}, false, 0, L"box faces" },
         { ICON_TO_SHAPE, { 0.4f, 0.2f, 0.8f }, {}, false, 0, L"shape" },
         { ICON_TO_CIRCLE, { 0.05f, 0.62f, 0.7f }, {}, false, 0, L"circle" },
         { ICON_DRAW, { 0.92f, 0.92f, 0.92f }, {}, false, 0, L"draw" },
@@ -2433,11 +2673,10 @@ static void RenderGuide() {
     int x = x1 + 120;
     for (size_t i = 0; i < _countof(legend); ++i) {
         // Next line when this one is full.
-        SelectObject(dc, fNote);
-        RECT need{ 0, 0, 400, 40 }; DrawTextW(dc, legend[i].word, -1, &need, DT_CALCRECT | DT_SINGLELINE);
-        if (x + 46 + need.right > xEnd && x > x1 + 120) { x = x1 + 120; y += 44; }
+        const int needW = width(legend[i].word, fNote);
+        if (x + 46 + needW > xEnd && x > x1 + 120) { x = x1 + 120; y += 44; }
         placed[i] = { x + 19, y + 20 };
-        RECT m{ x + 46, y, x + 46 + need.right + 4, y + 40 };
+        RECT m{ x + 46, y, x + 46 + needW + 4, y + 40 };
         text(legend[i].word, fNote, cText, m, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         x = m.right + 40;
     }
@@ -2461,8 +2700,12 @@ static void RenderGuide() {
     notes(L"DEPTH", g.depth, x2, x3 - 40);
     notes(L"STATUS", g.status, x3, xEnd);
 
+#ifdef _WIN32
     GdiFlush();
     g_guidePixels.assign((const uint32_t*)bits, (const uint32_t*)bits + kGuideW * kGuideH);
+#else
+    g_guidePixels = cv.px;
+#endif
     for (auto& p : g_guidePixels) p |= 0xFF000000u;
     for (size_t i = 0; i < _countof(legend); ++i)
         PaintIcon(g_guidePixels.data(), kGuideW, kGuideH, placed[i].x, placed[i].y, 19.0f, legend[i]);
@@ -2472,9 +2715,9 @@ static void RenderGuide() {
     }
     g_guideDirty = true;
     // Dev only: with ALPHA_VIEWS_DUMP set, save the latest guide image as guide_dump.ppm.
-    static bool dumpOn = GetEnvironmentVariableA("ALPHA_VIEWS_DUMP", nullptr, 0) > 0;
+    static bool dumpOn = !EnvVar("ALPHA_VIEWS_DUMP").empty();
     if (dumpOn) {
-        if (FILE* f = fopen((g_dir + "\\guide_dump.ppm").c_str(), "wb")) {
+        if (FILE* f = fopen((g_dir + PATH_SEP "guide_dump.ppm").c_str(), "wb")) {
             fprintf(f, "P6 %d %d 255\n", kGuideW, kGuideH);
             for (uint32_t px : g_guidePixels) { unsigned char c[3] = { (unsigned char)(px >> 16), (unsigned char)(px >> 8), (unsigned char)px }; fwrite(c, 1, 3, f); }
             fclose(f);
@@ -2866,7 +3109,7 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
             float sy = stick(h.stickY), sx = stick(h.stickX);
             if (sy != 0) {
                 // Faster when far. Keep the window between 15 cm and 6 m in front of the controller.
-                float z0 = XMLoadFloat4x4(&h.rel).r[3].m128_f32[2];   // window centre in controller space
+                float z0 = XMVectorGetZ(XMLoadFloat4x4(&h.rel).r[3]);   // window centre in controller space
                 float dist = std::max(0.5f, -(z0 - h.push));
                 h.push = std::clamp(h.push + sy * dist * float(dt), z0 + 0.15f, std::max(z0 + 0.15f, z0 + 6.0f));
             }
@@ -3182,6 +3425,16 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
                 float b = w.keep ? 0.95f : (hover ? 0.62f : 0.42f);
                 icon(at, kButtonR * (hover || w.keep ? 1.25f : 1.0f), ICON_KEEP, b, b, b, face, face, w.keep ? gOn : gOff);
             }
+            if (w.hd > 0) {
+                // box faces button (boxes only): its colour says the face mode, each press the next
+                // (green whole box, orange top + far wall, blue far wall + floor, purple all but front + floor)
+                XMVECTOR at = TargetPoint(w, GRAB_FACESBTN, -1);
+                bool hover = gazeOn(GRAB_FACESBTN, -1) || handHover(at, kButtonHit);
+                const float* c = kBoxModeCol[std::clamp(w.boxMode, 0, 3)];
+                float s = hover ? 1.15f : 0.9f;
+                icon(at, kButtonR * (hover ? 1.25f : 1.0f), ICON_FACES, std::min(1.0f, c[0] * s), std::min(1.0f, c[1] * s),
+                     std::min(1.0f, c[2] * s), face, face);
+            }
             if (!IsShape(w)) {
                 // circle button (teal): shows what it switches to (a circle, or back to a rectangle)
                 XMVECTOR at = TargetPoint(w, GRAB_CIRCLEBTN, -1);
@@ -3388,6 +3641,7 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
 static bool HasAnythingToDraw() { return CutoutsShown() || g_edit; }
 
 // ================================================================ drawing
+#ifdef _WIN32
 static ID3D11RenderTargetView* GetRTV(SwapchainInfo& sc, uint32_t image, uint32_t slice) {
     uint64_t key = (uint64_t(image) << 32) | slice;
     auto it = sc.rtvs.find(key);
@@ -3395,7 +3649,7 @@ static ID3D11RenderTargetView* GetRTV(SwapchainInfo& sc, uint32_t image, uint32_
     if (image >= sc.images.size()) return nullptr;
     D3D11_TEXTURE2D_DESC td; sc.images[image]->GetDesc(&td);
     D3D11_RENDER_TARGET_VIEW_DESC rd{};
-    rd.Format = sc.format;
+    rd.Format = (DXGI_FORMAT)sc.format;
     if (td.ArraySize > 1) {
         rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
         rd.Texture2DArray.FirstArraySlice = slice;
@@ -3409,6 +3663,7 @@ static ID3D11RenderTargetView* GetRTV(SwapchainInfo& sc, uint32_t image, uint32_
     sc.rtvs[key] = rtv;
     return rtv;
 }
+#endif
 
 // The game's depth for one view (from XrCompositionLayerDepthInfoKHR in its last xrEndFrame).
 struct ViewDepth {
@@ -3428,6 +3683,57 @@ struct DrawView {
     ViewDepth depth;
 };
 
+// psBox's constants for one view (cbuffers B and W): the view's rects, fov and depth mapping, and
+// every window in this eye's view space. Returns false if the game's depth can't be used after all
+// (an empty depth range); then info.x = 0 and psBox works without it.
+static bool FillBoxCB(const DrawView& pv, XMMATRIX cam, bool haveDepth, const XMFLOAT4& col, CBBox& bb, CBWin& wb) {
+    const XrRect2Di& r = pv.rect;
+    const ViewDepth& vd = pv.depth;
+    bb = CBBox{};
+    bb.rectC = { (float)r.offset.x, (float)r.offset.y, (float)r.extent.width, (float)r.extent.height };
+    bb.rectD = { (float)vd.rect.offset.x, (float)vd.rect.offset.y, (float)vd.rect.extent.width, (float)vd.rect.extent.height };
+    bb.tanLRDU = { tanf(pv.fov.angleLeft), tanf(pv.fov.angleRight), tanf(pv.fov.angleDown), tanf(pv.fov.angleUp) };
+    auto inv = [](float z) { return (std::isfinite(z) && z > 0) ? 1.0f / z : 0.0f; };
+    float range = vd.maxDepth - vd.minDepth;
+    bb.depthMap = { vd.minDepth, fabsf(range) > 1e-6f ? 1.0f / range : 0.0f, inv(vd.nearZ), inv(vd.farZ) };
+    bb.col = col;
+    if (fabsf(range) <= 1e-6f) haveDepth = false;
+    bool anyFaces = false;
+    int nw = std::min((int)g_windows.size(), kMaxWindows);
+    wb.count = { (float)nw, 0, 0, 0 };
+    for (int wi = 0; wi < nw; ++wi) {
+        const Window& w = g_windows[wi];
+        WinGPU& g = wb.win[wi];
+        XMStoreFloat4x4(&g.toLocal, XMMatrixTranspose(cam * XMMatrixInverse(nullptr, WinMatrix(w))));
+        float kind = w.keep ? 2.0f : (w.hd > 0 ? 1.0f : 0.0f);
+        g.dim = { w.hw, w.hh, w.hd, kind };
+        g.radii = { w.radius[0], w.radius[1], w.radius[2], w.radius[3] };
+        int np = IsShape(w) ? (int)std::min<size_t>(w.pts.size(), kMaxShapePts) : 0;
+        float faceMode = w.hd > 0 ? (float)std::clamp(w.boxMode, 0, 3) : 0.0f;
+        if (faceMode > 0) anyFaces = true;
+        g.shape = { (float)np, (!np && w.ellipse) ? 1.0f : 0.0f, 8 * w.hw * w.hh * w.hd, faceMode };
+        for (int k = 0; k < np; ++k) {
+            float* q = &g.pts[k / 2].x + (k & 1) * 2;
+            q[0] = w.pts[k].x; q[1] = w.pts[k].y;
+        }
+    }
+    bb.info = { haveDepth ? 1.0f : 0.0f, anyFaces ? 1.0f : 0.0f, 0, 0 };
+    return haveDepth;
+}
+
+// Key colour mode: darken edit handles close to the key colour so the streamer doesn't key them out.
+static void DarkenKeyedHandles(Inst* ui, UINT n) {
+    if (!UseKeyColour()) return;
+    const float* k = kKeyCol[g_keyMode];
+    for (UINT i = 0; i < n; ++i) {
+        float dr = ui[i].cr - k[0], dg = ui[i].cg - k[1], db = ui[i].cb - k[2];
+        if (dr * dr + dg * dg + db * db < 0.5f) { ui[i].cr *= 0.45f; ui[i].cg *= 0.45f; ui[i].cb *= 0.45f; }
+        float gr = ui[i].gr - k[0], gg = ui[i].gg - k[1], gb = ui[i].gb - k[2];
+        if (ui[i].ga > 0 && gr * gr + gg * gg + gb * gb < 0.5f) { ui[i].gr *= 0.45f; ui[i].gg *= 0.45f; ui[i].gb *= 0.45f; }
+    }
+}
+
+#ifdef _WIN32
 // Typeless format to copy a depth image into, and the format our shader reads it as.
 static bool DepthCopyFormats(DXGI_FORMAT f, DXGI_FORMAT& typeless, DXGI_FORMAT& srv) {
     switch (f) {
@@ -3483,7 +3789,7 @@ static ID3D11ShaderResourceView* GetGameDepth(const ViewDepth& vd) {
     return dc.srv;
 }
 
-static void DrawMask(const std::vector<DrawView>& dviews) {
+static void DrawMaskD3D(const std::vector<DrawView>& dviews) {
     ID3DDeviceContextState* prev = nullptr;
     g_ctx->SwapDeviceContextState(g_state, &prev);
 
@@ -3494,16 +3800,7 @@ static void DrawMask(const std::vector<DrawView>& dviews) {
             memcpy(m.pData, g_maskInst.data(), maskCount * sizeof(Inst));
             Inst* ui = (Inst*)m.pData + maskCount;
             memcpy(ui, g_uiInst.data(), uiCount * sizeof(Inst));
-            // Key colour mode: darken edit dots close to the key colour so the streamer doesn't key them out.
-            if (UseKeyColour()) {
-                const float* k = kKeyCol[g_keyMode];
-                for (UINT i = 0; i < uiCount; ++i) {
-                    float dr = ui[i].cr - k[0], dg = ui[i].cg - k[1], db = ui[i].cb - k[2];
-                    if (dr * dr + dg * dg + db * db < 0.5f) { ui[i].cr *= 0.45f; ui[i].cg *= 0.45f; ui[i].cb *= 0.45f; }
-                    float gr = ui[i].gr - k[0], gg = ui[i].gg - k[1], gb = ui[i].gb - k[2];
-                    if (ui[i].ga > 0 && gr * gr + gg * gg + gb * gb < 0.5f) { ui[i].gr *= 0.45f; ui[i].gg *= 0.45f; ui[i].gb *= 0.45f; }
-                }
-            }
+            DarkenKeyedHandles(ui, uiCount);
             g_ctx->Unmap(g_instVB, 0);
         } else {
             maskCount = uiCount = 0;
@@ -3631,35 +3928,10 @@ static void DrawMask(const std::vector<DrawView>& dviews) {
                     Log(depth ? "Box windows: using the game's depth.\n"
                               : "Box windows: no game depth this view, boxes act as solid blocks.\n");
                 g_depthRead = ds;
-                const ViewDepth& vd = pv.depth;
-                CBBox bb{};
-                bb.rectC = { (float)r.offset.x, (float)r.offset.y, (float)r.extent.width, (float)r.extent.height };
-                bb.rectD = { (float)vd.rect.offset.x, (float)vd.rect.offset.y, (float)vd.rect.extent.width, (float)vd.rect.extent.height };
-                bb.tanLRDU = { tanf(pv.fov.angleLeft), tanf(pv.fov.angleRight), tanf(pv.fov.angleDown), tanf(pv.fov.angleUp) };
-                auto inv = [](float z) { return (std::isfinite(z) && z > 0) ? 1.0f / z : 0.0f; };
-                float range = vd.maxDepth - vd.minDepth;
-                bb.depthMap = { vd.minDepth, fabsf(range) > 1e-6f ? 1.0f / range : 0.0f, inv(vd.nearZ), inv(vd.farZ) };
-                bb.col = cb.col;
-                if (fabsf(range) <= 1e-6f) depth = nullptr;
-                bb.info = { depth ? 1.0f : 0.0f, 0, 0, 0 };
-                g_ctx->UpdateSubresource(g_cbBox, 0, nullptr, &bb, 0, 0);
+                static CBBox bb;
                 static CBWin wb;   // ~12 KB: not on the stack
-                int nw = std::min((int)g_windows.size(), kMaxWindows);
-                wb.count = { (float)nw, 0, 0, 0 };
-                for (int wi = 0; wi < nw; ++wi) {
-                    const Window& w = g_windows[wi];
-                    WinGPU& g = wb.win[wi];
-                    XMStoreFloat4x4(&g.toLocal, XMMatrixTranspose(cam * XMMatrixInverse(nullptr, WinMatrix(w))));
-                    float kind = w.keep ? 2.0f : (w.hd > 0 ? 1.0f : 0.0f);
-                    g.dim = { w.hw, w.hh, w.hd, kind };
-                    g.radii = { w.radius[0], w.radius[1], w.radius[2], w.radius[3] };
-                    int np = IsShape(w) ? (int)std::min<size_t>(w.pts.size(), kMaxShapePts) : 0;
-                    g.shape = { (float)np, (!np && w.ellipse) ? 1.0f : 0.0f, 8 * w.hw * w.hh * w.hd, 0 };
-                    for (int k = 0; k < np; ++k) {
-                        float* q = &g.pts[k / 2].x + (k & 1) * 2;
-                        q[0] = w.pts[k].x; q[1] = w.pts[k].y;
-                    }
-                }
+                if (!FillBoxCB(pv, cam, depth != nullptr, cb.col, bb, wb)) depth = nullptr;
+                g_ctx->UpdateSubresource(g_cbBox, 0, nullptr, &bb, 0, 0);
                 g_ctx->UpdateSubresource(g_cbWin, 0, nullptr, &wb, 0, 0);
                 ID3D11Buffer* cbs[2] = { g_cbBox, g_cbWin };
                 g_ctx->PSSetConstantBuffers(1, 2, cbs);
@@ -3674,7 +3946,7 @@ static void DrawMask(const std::vector<DrawView>& dviews) {
         // 2b. Edit-mode guide panel: solid (alpha 1), over windows, under hands and handles.
         if (drawGuide) {
             g_ctx->UpdateSubresource(g_cb, 0, nullptr, &cb, 0, 0);
-            DXGI_FORMAT f = it->second.format;
+            DXGI_FORMAT f = (DXGI_FORMAT)it->second.format;
             bool linearRT = f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
                             f == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB || f == DXGI_FORMAT_R16G16B16A16_FLOAT ||
                             f == DXGI_FORMAT_R11G11B10_FLOAT || f == DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -3760,6 +4032,27 @@ static void DrawMask(const std::vector<DrawView>& dviews) {
     }
     g_ctx->SwapDeviceContextState(prev, nullptr);
     if (prev) prev->Release();
+}
+#endif
+
+#include "render_vk.h"
+
+// The layer is active in this session: D3D11 / D3D12 or Vulkan set up.
+#ifdef _WIN32
+static bool Active() { return g_dev || VkActive(); }
+#else
+static bool Active() { return VkActive(); }
+#endif
+static void DrawMask(const std::vector<DrawView>& dviews) {
+    if (VkActive()) { DrawMaskVk(dviews); return; }
+#ifdef _WIN32
+    if (g_dev) DrawMaskD3D(dviews);
+#endif
+}
+static void ReleaseGraphics() {
+    ReleaseVk();
+    ReleaseD3D();
+    g_swapchains.clear();
 }
 
 // ================================================================ system pinch + eye gaze actions
@@ -4101,17 +4394,24 @@ static XrResult XRAPI_CALL Hook_xrCreateSession(XrInstance instance, const XrSes
     if (XR_FAILED(r)) return r;
     std::lock_guard<std::mutex> lk(g_mutex);
 
+    const XrGraphicsBindingVulkanKHR* vk = nullptr;   // also XR_KHR_vulkan_enable2 (same structure type)
+    for (auto* p = (const XrBaseInStructure*)info->next; p; p = p->next)
+        if (p->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR) vk = (const XrGraphicsBindingVulkanKHR*)p;
+#ifdef _WIN32
     const XrGraphicsBindingD3D11KHR* d3d = nullptr;
     const XrGraphicsBindingD3D12KHR* d3d12 = nullptr;
     for (auto* p = (const XrBaseInStructure*)info->next; p; p = p->next) {
         if (p->type == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR) d3d = (const XrGraphicsBindingD3D11KHR*)p;
         if (p->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) d3d12 = (const XrGraphicsBindingD3D12KHR*)p;
     }
-    if (!d3d && d3d12 && !g_d3d12Enabled) {
+    if (!d3d && !vk && d3d12 && !g_d3d12Enabled) {
         Log("D3D12 game: layer inactive. To try experimental D3D12 support press Ctrl+Alt+D, then restart the game.\n");
         return r;
     }
-    if (!d3d && !d3d12) { Log("Session is not D3D11 or D3D12 (Vulkan/OpenGL?), layer inactive.\n"); return r; }
+    if (!d3d && !d3d12 && !vk) { Log("Session is not D3D11, D3D12 or Vulkan (OpenGL?), layer inactive.\n"); return r; }
+#else
+    if (!vk) { Log("Session is not Vulkan (OpenGL?), layer inactive.\n"); return r; }
+#endif
 
     uint32_t n = 0;
     nEnumerateEnvironmentBlendModes(instance, info->systemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &n, nullptr);
@@ -4121,19 +4421,24 @@ static XrResult XRAPI_CALL Hook_xrCreateSession(XrInstance instance, const XrSes
     for (auto m : modes) if (m == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND) g_alphaSupported = true;
     Log("Runtime offers ALPHA_BLEND: %s\n", g_alphaSupported ? "yes" : "no");
     if (UseKeyColour())
-        Log("Cutouts painted %ls (key colour for %s): set your streamer to key out %ls. Ctrl+Alt+C changes it.\n",
+        Log("Cutouts painted %ls (key colour for %s): set your streamer to key out %ls. Change it with " KEY_COLOUR_HOW ".\n",
             kKeyName[g_keyMode], g_runtimeName.c_str(), kKeyName[g_keyMode]);
     else if (!g_alphaSupported && g_forceAlpha)
         Log("Force alpha ON: cutouts are transparent and layer alpha flags are set; the game's own blend mode is kept (Ctrl+Alt+K turns this off).\n");
     else if (!g_alphaSupported)
         // Stay active (hotkeys and edit mode work) but draw no cutouts until a key colour is chosen.
-        Log("%s has no alpha passthrough, so cutouts are hidden. Edit mode still works. Press Ctrl+Alt+C for a key colour "
+        Log("%s has no alpha passthrough, so cutouts are hidden. Edit mode still works. Use " KEY_COLOUR_HOW " for a key colour "
             "(green / blue / pink) if your streamer can key it out (e.g. Virtual Desktop).\n",
             g_runtimeName.c_str());
 
-    ReleaseD3D();
-    if (d3d) {
-        if (!InitD3D(d3d->device)) { Log("D3D11 init failed, layer inactive.\n"); ReleaseD3D(); return r; }
+    ReleaseGraphics();
+    if (vk) {
+        if (!InitVk(vk)) { Log("Vulkan init failed, layer inactive.\n"); ReleaseGraphics(); return r; }
+        Log("Vulkan session hooked.\n");
+    }
+#ifdef _WIN32
+    else if (d3d) {
+        if (!InitD3D(d3d->device)) { Log("D3D11 init failed, layer inactive.\n"); ReleaseGraphics(); return r; }
         Log("D3D11 session hooked.\n");
     } else {
         ID3D11Device* dev11 = nullptr;
@@ -4142,9 +4447,10 @@ static XrResult XRAPI_CALL Hook_xrCreateSession(XrInstance instance, const XrSes
         if (FAILED(hr) || !dev11) { Log("D3D11On12 device failed 0x%08X, layer inactive.\n", (unsigned)hr); return r; }
         bool ok = SUCCEEDED(dev11->QueryInterface(__uuidof(ID3D11On12Device), (void**)&g_on12)) && InitD3D(dev11);
         dev11->Release();
-        if (!ok) { Log("D3D12 init failed, layer inactive.\n"); ReleaseD3D(); return r; }
+        if (!ok) { Log("D3D12 init failed, layer inactive.\n"); ReleaseGraphics(); return r; }
         Log("D3D12 session hooked (EXPERIMENTAL, via D3D11On12). Ctrl+Alt+D turns it off.\n");
     }
+#endif
     g_session = *session;
 
     ReleaseHands();
@@ -4215,7 +4521,7 @@ static XrResult XRAPI_CALL Hook_xrDestroySession(XrSession session) {
     {
         std::lock_guard<std::mutex> lk(g_mutex);
         if (session == g_session) {
-            ReleaseActions(); ReleaseHands(); ReleaseD3D(); g_session = XR_NULL_HANDLE;
+            ReleaseActions(); ReleaseHands(); ReleaseGraphics(); g_session = XR_NULL_HANDLE;
             g_scSlots.clear(); g_locViews.clear(); g_endViews.clear(); g_endTime = g_endPeriod = 0;
             ResetDepthStatus();
         }
@@ -4224,14 +4530,56 @@ static XrResult XRAPI_CALL Hook_xrDestroySession(XrSession session) {
 }
 
 static XrResult XRAPI_CALL Hook_xrCreateSwapchain(XrSession session, const XrSwapchainCreateInfo* info, XrSwapchain* sc) {
-    XrResult r = nCreateSwapchain(session, info, sc);
-    if (XR_FAILED(r) || session != g_session || !g_dev) return r;
     bool color = (info->usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) != 0;
     bool depth = !color && (info->usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
+    if (VkActive() && session == g_session && (color || depth)) {
+        // Vulkan: depth images get the SAMPLED usage bit too, so psBox can read them (without it if refused).
+        XrResult r = XR_ERROR_RUNTIME_FAILURE;
+        bool sampled = depth && (info->usageFlags & XR_SWAPCHAIN_USAGE_SAMPLED_BIT) != 0, made = false;
+        if (depth && !sampled) {
+            XrSwapchainCreateInfo ci = *info;
+            ci.usageFlags |= XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+            r = nCreateSwapchain(session, &ci, sc);
+            made = sampled = XR_SUCCEEDED(r);
+            if (!made) Log("Depth swapchain with the sampled bit refused (%d): trying without (boxes act as solid blocks).\n", (int)r);
+        }
+        if (!made) r = nCreateSwapchain(session, info, sc);
+        if (XR_FAILED(r)) return r;
+        std::lock_guard<std::mutex> lk(g_mutex);
+        SwapchainInfo si;
+        si.format = info->format;
+        si.depth = depth;
+        si.vk.width = info->width; si.vk.height = info->height;
+        si.vk.layers = std::max(1u, info->arraySize); si.vk.samples = std::max(1u, info->sampleCount);
+        si.vk.sampled = sampled;
+        uint32_t n = 0;
+        nEnumerateSwapchainImages(*sc, 0, &n, nullptr);
+        std::vector<XrSwapchainImageVulkanKHR> imgs(n, { XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR });
+        nEnumerateSwapchainImages(*sc, n, &n, (XrSwapchainImageBaseHeader*)imgs.data());
+        for (auto& i : imgs) si.vk.images.push_back(i.image);
+        if (depth) {
+            g_gameMadeDepth = true;
+            VkFormatProperties fp{};
+            g_vk.f.vkGetPhysicalDeviceFormatProperties(g_vk.phys, (VkFormat)info->format, &fp);
+            if (sampled && !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) {
+                Log("Depth format %d can't be sampled on this GPU: boxes act as solid blocks.\n", (int)info->format);
+                si.vk.sampled = false;
+            }
+        }
+        Log("%s swapchain %dx%d format %d, %u images, %u samples, %u layers (Vulkan)\n", depth ? "Depth" : "Colour",
+            info->width, info->height, (int)info->format, n, info->sampleCount, info->arraySize);
+        g_swapchains[*sc] = std::move(si);
+        return r;
+    }
+    XrResult r = nCreateSwapchain(session, info, sc);
+#ifndef _WIN32
+    return r;
+#else
+    if (XR_FAILED(r) || session != g_session || !g_dev) return r;
     if (!color && !depth) return r;
     std::lock_guard<std::mutex> lk(g_mutex);
     SwapchainInfo si;
-    si.format = (DXGI_FORMAT)info->format;
+    si.format = info->format;
     si.depth = depth;
     uint32_t n = 0;
     nEnumerateSwapchainImages(*sc, 0, &n, nullptr);
@@ -4282,6 +4630,7 @@ static XrResult XRAPI_CALL Hook_xrCreateSwapchain(XrSession session, const XrSwa
     g_swapchains[*sc] = std::move(si);
     Log("Swapchain %dx%d format %d, %u images\n", info->width, info->height, (int)info->format, n);
     return r;
+#endif
 }
 
 static XrResult XRAPI_CALL Hook_xrDestroySwapchain(XrSwapchain sc) {
@@ -4289,8 +4638,11 @@ static XrResult XRAPI_CALL Hook_xrDestroySwapchain(XrSwapchain sc) {
         std::lock_guard<std::mutex> lk(g_mutex);
         auto it = g_swapchains.find(sc);
         if (it != g_swapchains.end()) {
+            if (VkActive()) { VkWaitAll(); VkReleaseSwapchain(it->second); }
+#ifdef _WIN32
             ReleaseSwapchainInfo(it->second);
             if (g_on12 && g_ctx) g_ctx->Flush(); // let D3D11On12 drop its references now
+#endif
             g_swapchains.erase(it);
         }
         g_scSlots.erase(sc);
@@ -4324,11 +4676,12 @@ static XrResult XRAPI_CALL Hook_xrLocateViews(XrSession session, const XrViewLoc
 // Dev only: with ALPHA_VIEWS_DUMP set, save the alpha (passthrough mask) of one eye image as
 // mask_dump.ppm (colour image, passthrough tinted green) after ~200 frames, to check cutouts
 // without looking through the headset.
+#ifdef _WIN32
 static void MaybeDumpMask(XrSwapchain sc) {
     static int frames = 0;
-    static bool on = GetEnvironmentVariableA("ALPHA_VIEWS_DUMP", nullptr, 0) > 0;
+    static bool on = !EnvVar("ALPHA_VIEWS_DUMP").empty();
     static bool editOnly = [] { char v[16] = {}; GetEnvironmentVariableA("ALPHA_VIEWS_DUMP", v, sizeof v); return strcmp(v, "edit") == 0; }();
-    if (!on || g_on12 || (editOnly && !g_edit) || ++frames != 200) return;   // "edit": count only in edit mode
+    if (!on || !g_dev || g_on12 || (editOnly && !g_edit) || ++frames != 200) return;   // "edit": count only in edit mode
     auto it = g_swapchains.find(sc);
     if (it == g_swapchains.end() || it->second.lastAcquired >= it->second.images.size()) return;
     ID3D11Texture2D* src = it->second.images[it->second.lastAcquired];
@@ -4343,7 +4696,7 @@ static void MaybeDumpMask(XrSwapchain sc) {
     if (SUCCEEDED(g_ctx->Map(st, 0, D3D11_MAP_READ, 0, &m))) {
         const int step = 4;   // quarter size
         // Colour image (R/B order ignored), passthrough pixels tinted green.
-        FILE* f = fopen((g_dir + "\\mask_dump.ppm").c_str(), "wb");
+        FILE* f = fopen((g_dir + PATH_SEP "mask_dump.ppm").c_str(), "wb");
         if (f) {
             fprintf(f, "P6\n%u %u\n255\n", td.Width / step, td.Height / step);
             for (UINT y = 0; y + step <= td.Height; y += step)
@@ -4359,6 +4712,9 @@ static void MaybeDumpMask(XrSwapchain sc) {
     }
     st->Release();
 }
+#else
+static void MaybeDumpMask(XrSwapchain) {}
+#endif
 
 static XrResult XRAPI_CALL Hook_xrReleaseSwapchainImage(XrSwapchain sc, const XrSwapchainImageReleaseInfo* info) {
     {
@@ -4398,7 +4754,7 @@ static XrResult XRAPI_CALL Hook_xrReleaseSwapchainImage(XrSwapchain sc, const Xr
             }
         }
         const std::vector<XrView>& views = *viewsP;
-        if (g_dev && it != g_scSlots.end() && !views.empty()) {
+        if (Active() && it != g_scSlots.end() && !views.empty()) {
             static bool loggedStale = false;
             if (!fresh && !loggedStale) { Log("D3D12: game doesn't locate views before release; using last frame's views.\n"); loggedStale = true; }
             if (g_updatedFor != vtime) {
@@ -4423,7 +4779,7 @@ static XrResult XRAPI_CALL Hook_xrEndFrame(XrSession session, const XrFrameEndIn
     StartHotkeys();
     HandleD3D12Key();
     HandleForceAlphaKey();
-    if (session != g_session || !g_dev) {
+    if (session != g_session || !Active()) {
         g_hotkeyHits.fetch_and((1u << HK_D) | (1u << HK_K));   // idle: don't keep other presses for later
         return nEndFrame(session, info);
     }
@@ -4568,7 +4924,7 @@ static XrResult XRAPI_CALL Hook_xrDestroyInstance(XrInstance instance) {
         g_ctl = CtlActions();
         g_gameProfiles.clear();
         ReleaseHands();
-        ReleaseD3D();
+        ReleaseGraphics();
         g_session = XR_NULL_HANDLE;
         StopHotkeys();
     }
@@ -4662,7 +5018,7 @@ static XrResult XRAPI_CALL Layer_xrCreateApiLayerInstance(const XrInstanceCreate
 #if defined(_M_IX86)
 #pragma comment(linker, "/EXPORT:xrNegotiateLoaderApiLayerInterface=_xrNegotiateLoaderApiLayerInterface@12")
 #endif
-extern "C" __declspec(dllexport) XrResult XRAPI_CALL xrNegotiateLoaderApiLayerInterface(
+LAYER_EXPORT XrResult XRAPI_CALL xrNegotiateLoaderApiLayerInterface(
     const XrNegotiateLoaderInfo* loaderInfo, const char* layerName, XrNegotiateApiLayerRequest* req) {
     if (!loaderInfo || !req || loaderInfo->structType != XR_LOADER_INTERFACE_STRUCT_LOADER_INFO ||
         req->structType != XR_LOADER_INTERFACE_STRUCT_API_LAYER_REQUEST)

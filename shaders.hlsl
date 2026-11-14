@@ -38,7 +38,7 @@ cbuffer B : register(b1) {
     float4 rectD;          // depth image rect: x, y, width, height (texels)
     float4 tanLRDU;        // tan of the eye's fov angles: left, right, down, up
     float4 depthMap;       // minDepth, 1 / (maxDepth - minDepth), 1 / nearZ, 1 / farZ
-    float4 info;           // x = 1: game depth available
+    float4 info;           // x = 1: game depth available, y = 1: some box has a face mode (shape.w)
     float4 boxCol;         // output colour (alpha 0 = passthrough, or a solid key colour)
 };
 #define MAX_WIN 32         // kMaxWindows in layer.cpp
@@ -46,7 +46,8 @@ struct WinData {
     float4x4 toLocal;      // eye view space (metres) -> window local space
     float4 dim;            // half width, half height, half depth, kind: 0 flat, 1 box, 2 keep box
     float4 radii;          // corner radii (corner order as in layer.cpp)
-    float4 shape;          // x = free shape point count (0 = rounded rectangle), y = 1: circle, z = box volume
+    float4 shape;          // x = free shape point count (0 = rounded rectangle), y = 1: circle, z = box volume,
+                           // w = box face mode (0 whole box, 1 top + far wall, 2 far wall + floor, 3 all but front + floor)
     float4 pts[16];        // free shape points (local x, y), two per float4
 };
 cbuffer W : register(b2) { float4 winCount; WinData wins[MAX_WIN]; };
@@ -102,15 +103,105 @@ bool Through(int w, float3 e, float3 l) {
     return hit;
 }
 
+// Box face modes (WinData.shape.w), as in Alpha Views VR: 0 the whole box, 1 top + far wall,
+// 2 far wall + floor, 3 all but the front and the floor. In modes 1-3 the shown faces are walls of
+// passthrough: a pixel is passthrough where the eye -> surface segment crosses one of them, so the
+// game's own surfaces in front of a wall (or inside the box, short of the wall) stay visible.
+// Face kinds: 0 top, 1 floor, 2 far wall (back, -z), 3 front (+z, towards you), 4 side.
+bool FaceShown(int m, int k) {
+    if (m == 1) return k == 0 || k == 2;
+    if (m == 2) return k == 2 || k == 1;
+    if (m == 3) return k != 3 && k != 1;
+    return true;
+}
+bool InBox(int w, float3 q) { return abs(q.z) <= max(wins[w].dim.z, 0.0005) && InOutline(w, q.xy); }
+float SegDist(float2 p, float2 a, float2 b) {
+    float2 pa = p - a, ba = b - a;
+    return length(pa - ba * saturate(dot(pa, ba) / max(dot(ba, ba), 1e-12)));
+}
+// Outward normal (local x, y) of window w's outline near q.
+float2 SideNormal(int w, float2 q) {
+    float2 h = wins[w].dim.xy;
+    float2 nn = float2(0, 1);
+    if (wins[w].shape.x > 2.5) {             // free shape (counter-clockwise): the nearest edge
+        int n = (int)wins[w].shape.x;
+        float best = 1e30;
+        [loop] for (int i = 0; i < n; ++i) {
+            float2 a = ShapePt(w, i), b = ShapePt(w, i + 1 < n ? i + 1 : 0);
+            float dd = SegDist(q, a, b);
+            if (dd < best && dot(b - a, b - a) > 1e-12) { best = dd; nn = normalize(float2(b.y - a.y, a.x - b.x)); }
+        }
+    } else if (wins[w].shape.y > 0.5) {      // circle (ellipse)
+        nn = normalize(q / max(h * h, 1e-8));
+    } else {
+        float4 rd = wins[w].radii;
+        float2 s = float2(q.x < 0 ? -1 : 1, q.y < 0 ? -1 : 1);
+        float2 a = abs(q);
+        float r = q.x < 0 ? (q.y < 0 ? rd.x : rd.w) : (q.y < 0 ? rd.y : rd.z);
+        float2 c = a - (h - r);
+        if (r > 1e-5 && c.x > 0 && c.y > 0) nn = normalize(c) * s;                  // a rounded corner
+        else nn = (a.x - h.x > a.y - h.y) ? float2(s.x, 0) : float2(0, s.y);        // a straight edge
+    }
+    return nn;
+}
+// Kind of face crossed between a point inside box w (pi) and one just outside it (po).
+int FaceKind(int w, float3 pi, float3 po) {
+    float hz = max(wins[w].dim.z, 0.0005);
+    if (abs(po.z) > hz && (InOutline(w, po.xy) || abs(pi.z) > hz * 0.999)) return po.z > 0 ? 3 : 2;   // a cap
+    float ny = SideNormal(w, po.xy).y;
+    return ny > 0.7 ? 0 : (ny < -0.7 ? 1 : 4);
+}
+// Does the eye -> surface segment (e -> l, window w's local space) cross a face that box mode m shows?
+// The segment is sampled inside the box's bounds; each inside / outside change is refined by bisection.
+bool CrossesShownFace(int w, int m, float3 e, float3 l) {
+    float3 d = l - e;
+    float3 dd = (abs(d) < 1e-6) ? 1e-6 : d;
+    float3 ext = float3(wins[w].dim.xy, max(wins[w].dim.z, 0.0005));
+    float3 t0 = (-ext - e) / dd, t1 = (ext - e) / dd;
+    float3 tn = min(t0, t1), tf = max(t0, t1);
+    float a = max(max(tn.x, tn.y), max(tn.z, 0)), b = min(min(tf.x, tf.y), min(tf.z, 1));
+    if (a > b) return false;                 // the segment misses the box's bounds
+    // Samples: just before the bounds (or the eye, if inside them), N inside, then just past them (or
+    // the surface, if inside them), so every bisection works on a short stretch, even when the
+    // surface is 10 km away (sky, or no game depth).
+    const int N = 24;
+    float step = (b - a) * (0.5 / N);
+    float tp = a > 0 ? max(0, a - step) : 0;
+    float tEnd = b < 1 ? min(1, b + step) : 1;
+    bool ip = InBox(w, e + d * tp);
+    [loop] for (int i = 0; i <= N; ++i) {
+        float tc = i < N ? lerp(a, b, (i + 0.5) / N) : tEnd;
+        bool ic = InBox(w, e + d * tc);
+        if (ic != ip) {
+            float lo = tp, hi = tc;          // ip at lo, ic at hi
+            [loop] for (int k = 0; k < 10; ++k) {
+                float mid = 0.5 * (lo + hi);
+                if (InBox(w, e + d * mid) == ip) lo = mid; else hi = mid;
+            }
+            float3 pLo = e + d * lo, pHi = e + d * hi;
+            int kind = ip ? FaceKind(w, pLo, pHi) : FaceKind(w, pHi, pLo);
+            if (FaceShown(m, kind)) return true;
+        }
+        tp = tc; ip = ic;
+    }
+    return false;
+}
+
 float4 psBox(float4 p : SV_POSITION) : SV_TARGET {
-    if (info.x < 0.5) return boxCol; // no game depth: every window shape shows passthrough
+    // No game depth: every window shape shows passthrough. (info.y = 1: some box has a face mode;
+    // then work each pixel out as if the game drew nothing there, 10 km away.)
+    bool noDepth = info.x < 0.5;
+    if (noDepth && info.y < 0.5) return boxCol;
     float2 uv = (p.xy - rectC.xy) / rectC.zw;
-    int2 t = int2(rectD.xy + saturate(uv) * (rectD.zw - 1));
-    float z01 = saturate((gDepth.Load(int3(t, 0)) - depthMap.x) * depthMap.y);
-    // Standard perspective depth: 1/distance is linear in the stored value. Works for reversed
-    // and infinite depth too (1/inf = 0). Sky / nothing drawn: 10 km away, beyond any box.
-    float inv = (1 - z01) * depthMap.z + z01 * depthMap.w;
-    float dist = inv <= 1e-4 ? 1e4 : 1 / inv;
+    float dist = 1e4;
+    if (!noDepth) {
+        int2 t = int2(rectD.xy + saturate(uv) * (rectD.zw - 1));
+        float z01 = saturate((gDepth.Load(int3(t, 0)) - depthMap.x) * depthMap.y);
+        // Standard perspective depth: 1/distance is linear in the stored value. Works for reversed
+        // and infinite depth too (1/inf = 0). Sky / nothing drawn: 10 km away, beyond any box.
+        float inv = (1 - z01) * depthMap.z + z01 * depthMap.w;
+        dist = inv <= 1e-4 ? 1e4 : 1 / inv;
+    }
     float3 v = float3(lerp(tanLRDU.x, tanLRDU.y, uv.x) * dist, lerp(tanLRDU.w, tanLRDU.z, uv.y) * dist, -dist);
     int n = (int)winCount.x;
     int best = -1;
@@ -128,9 +219,14 @@ float4 psBox(float4 p : SV_POSITION) : SV_TARGET {
             }
             continue;
         }
+        int mode = (int)(wins[w].shape.w + 0.5);
+        if (mode > 0) {              // box face mode: only the faces it shows are passthrough
+            if (!seen && CrossesShownFace(w, mode, e, l)) seen = true;
+            continue;
+        }
         if (abs(l.z) <= wins[w].dim.z && InOutline(w, l.xy)) {
             if (wins[w].shape.z < bestVol) { bestVol = wins[w].shape.z; best = w; }
-        } else if (kind > 1.5 && !seen && Through(w, e, l)) {
+        } else if ((kind > 1.5 || noDepth) && !seen && Through(w, e, l)) {
             seen = true;
         }
     }
@@ -267,6 +363,14 @@ float Glyph(int id, float2 p) {
         float d = min(Seg(p, float2(-0.5, -0.4), float2(0.5, -0.4)), Seg(p, float2(0, -0.4), float2(0, 0.52)));
         d = min(d, min(Seg(p, float2(0.2, -0.4), float2(0.2, -0.2)), Seg(p, float2(0.2, -0.2), float2(0, -0.2))));
         g = d - 0.07;
+    }
+    if (id == 15) {         // box faces: a box with a solid far wall behind its open front
+        float front = Box(p, float2(-0.12, -0.12), float2(0.3, 0.3));
+        float back = max(Box(p, float2(0.12, 0.12), float2(0.3, 0.3)), -(front - 0.03));
+        float d = abs(front) - 0.065;
+        d = min(d, Seg(p, float2(-0.42, 0.18), float2(-0.18, 0.42)) - 0.065);
+        d = min(d, Seg(p, float2(0.18, -0.42), float2(0.42, -0.18)) - 0.065);
+        g = min(d, back);
     }
     return g;
 }

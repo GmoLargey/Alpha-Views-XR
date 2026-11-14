@@ -33,6 +33,10 @@ cmake --build (Join-Path $root 'build') --config Release
 if ($LASTEXITCODE) { throw 'layer build failed' }
 $dllVer = (Get-Item "$root\build\Release\XR_APILAYER_GMO_alpha_views_xr.dll").VersionInfo.ProductVersion
 if ($dllVer -ne $ver) { throw "DLL version is '$dllVer' but CMakeLists.txt says $ver (re-run cmake?)" }
+# Keep the prebuilt SPIR-V shaders (spirv\, for builds without dxc) in step with shaders.hlsl.
+$spv = Get-ChildItem "$root\build\shaders\*.spv.h" -ErrorAction SilentlyContinue
+if ($spv) { New-Item -ItemType Directory -Force "$root\spirv" | Out-Null; Copy-Item $spv.FullName "$root\spirv" -Force }
+elseif (-not (Test-Path "$root\spirv\psBox.spv.h")) { throw 'no SPIR-V shaders: install the Vulkan SDK (dxc)' }
 # 32-bit layer, for 32-bit OpenXR games. Same code, own build folder.
 $b32 = Join-Path $root 'build32'
 if (-not (Test-Path "$b32\CMakeCache.txt")) { cmake -S $root -B $b32 -A Win32; if ($LASTEXITCODE) { throw '32-bit configure failed' } }
@@ -67,12 +71,28 @@ Remove-Item $zipDir -Recurse -Force
 if ($LASTEXITCODE) { throw 'installer build failed' }
 Remove-Item $stage -Recurse -Force
 
+# Linux tarball, built in WSL (skipped without it; on Linux run packaging/package.sh).
+if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
+    $wroot = (wsl.exe wslpath -a ($root -replace '\\', '/')).Trim()
+    wsl.exe -e sh "$wroot/packaging/package.sh"
+    if ($LASTEXITCODE) { throw 'Linux build failed' }
+} else { Write-Host 'WSL not found: no Linux tarball' }
+
 # Source package (GPL-3.0): everything needed to build the layer, test scene, zip and installer.
 # Build output, generated pictures, debug dumps and personal window files are left out.
 $src = Join-Path $dist "AlphaViewsXR-$ver-source"
 New-Item -ItemType Directory -Force "$src\packaging\source", "$src\test_scene" | Out-Null
-Copy-Item "$root\layer.cpp", "$root\shaders.hlsl", "$root\CMakeLists.txt", "$root\version.rc", "$root\guide_icons.rc",
+Copy-Item "$root\layer.cpp", "$root\render_vk.h", "$root\guide_font.h", "$root\shaders.hlsl", "$root\CMakeLists.txt", "$root\version.rc", "$root\guide_icons.rc",
     "$root\XR_APILAYER_GMO_alpha_views_xr.json", "$root\package.ps1", "$root\install.ps1", "$root\uninstall.ps1" $src
+# Vulkan shaders (prebuilt), Linux build files, test harness.
+New-Item -ItemType Directory -Force "$src\spirv", "$src\linux", "$src\tests", "$src\packaging\linux", "$src\packaging\gestures" | Out-Null
+Copy-Item "$root\spirv\*.spv.h" "$src\spirv"
+Copy-Item "$root\linux\embed_bmps.cmake", "$root\linux\sal.h", "$root\linux\exports.map", "$root\linux\XR_APILAYER_GMO_alpha_views_xr.json" "$src\linux"
+Copy-Item "$root\tests\xr_harness.cpp", "$root\tests\run_harness.ps1", "$root\tests\run_harness.sh", "$root\tests\harness_windows.cfg" "$src\tests"
+Copy-Item "$root\packaging\linux\install.sh", "$root\packaging\linux\uninstall.sh", "$root\packaging\linux\README.txt" "$src\packaging\linux"
+Copy-Item "$root\packaging\package.sh" "$src\packaging"
+# The guide panel pictures (made by gen_gestures.ps1, which needs Windows), so Linux can build too.
+Copy-Item "$root\packaging\gestures\*_120.bmp" "$src\packaging\gestures"
 Copy-Item "$root\packaging\source\README.md" "$src\README.md"
 Copy-Item "$root\packaging\source\gitignore.txt" "$src\.gitignore"
 # Plain GPL text (no header) so GitHub recognises the licence.
@@ -88,7 +108,10 @@ Copy-Item "$test\CMakeLists.txt", "$test\main.cpp", "$test\listext.cpp" "$src\te
 # Pictures shown on the GitHub page (README.md).
 New-Item -ItemType Directory -Force "$src\docs\images" | Out-Null
 Copy-Item "$root\packaging\gestures\Gestures.png", "$root\packaging\gestures\Controllers.png", "$root\packaging\gestures\Keyboard.png", "$root\packaging\gestures\Shapes.png" "$src\docs\images"
-Compress-Archive -Path $src -DestinationPath "$src.zip"
+# Windows' tar makes the zip: standard "/" paths, so it also unpacks properly on Linux (Compress-Archive
+# in Windows PowerShell writes "\").
+& "$env:SystemRoot\System32\tar.exe" -a -c -f "$src.zip" -C $dist (Split-Path $src -Leaf)
+if ($LASTEXITCODE) { throw 'source zip failed' }
 
 Get-ChildItem $dist | Select-Object Name, Length
 Get-ChildItem $dist | Select-Object Name, Length

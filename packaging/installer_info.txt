@@ -1,4 +1,4 @@
-ALPHA VIEWS XR  v1.4.4  by GmoLargey
+ALPHA VIEWS XR  v1.5.0  by GmoLargey
 https://github.com/GmoLargey/Alpha-Views-XR
 If you want to support me: https://ko-fi.com/virtuallyreal
 Free, open-source software (GNU GPL version 3).
@@ -31,8 +31,8 @@ BEFORE YOU START
 - Passthrough: if your streamer or PC runtime has an alpha channel
   (transparency), turn it on. If not, use its colour-key passthrough and pick
   the same colour here (Ctrl+Alt+C).
-- Games must run in OpenXR mode with Direct3D 11 (Direct3D 12 is experimental,
-  Ctrl+Alt+D, see README). SteamVR-only games don't work, because SteamVR
+- Games must run in OpenXR mode with Direct3D 11 or Vulkan (Direct3D 12 is
+  experimental, Ctrl+Alt+D, see README). SteamVR-only games don't work, because SteamVR
   removes the transparency.
 - No eye tracking? Touch the handles directly with your hand or controller.
 

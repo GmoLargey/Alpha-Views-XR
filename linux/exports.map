@@ -1,0 +1,5 @@
+/* The layer's one export; everything else (the built-in C++ runtime too) stays hidden. */
+{
+    global: xrNegotiateLoaderApiLayerInterface;
+    local: *;
+};

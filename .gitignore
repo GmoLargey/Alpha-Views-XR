@@ -2,7 +2,9 @@ build/
 build32/
 test_scene/build*/
 dist/
-packaging/gestures/
+tests/out/
+packaging/gestures/*
+!packaging/gestures/*_120.bmp
 packaging/gestures_preview.png
 *.user
 .vs/

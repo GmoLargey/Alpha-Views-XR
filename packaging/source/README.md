@@ -23,6 +23,8 @@ the keyboard.
 - **Depth boxes:** pull a window into a box, and only the game's surfaces *inside* the box turn
   to passthrough. Put one around your wheel to see your real wheel and hands, while the game's
   dials behind it stay visible. Boxes can be as deep as you like.
+- **Box faces:** choose which faces of a box let passthrough in (whole box, top + far wall, far
+  wall + floor, or all but front + floor), so a box can act like a room with real walls.
 - **Keep boxes:** the opposite. The box shows your room, but whatever the game draws inside it
   (a character, a cockpit display) stays.
 - **Hands behind objects:** game surfaces closer than your hand cover it.
@@ -31,8 +33,9 @@ the keyboard.
 - **Three ways to edit:** hand gestures, controllers (with a laser for headsets without eye
   tracking), or keyboard shortcuts. An in-headset guide panel shows the controls.
 - **Presets:** save and restore three window layouts per game.
-- **Wide game support:** Direct3D 11 OpenXR games, 64-bit and 32-bit. Direct3D 12 is
+- **Wide game support:** Direct3D 11 and Vulkan OpenXR games, 64-bit and 32-bit. Direct3D 12 is
   experimental (Ctrl+Alt+D).
+- **Windows and Linux:** the same layer for Linux (Vulkan games; e.g. Monado or WiVRn).
 - **Test scene included:** a spinning cube to check passthrough, depth and hands before you play.
 
 ## Controls
@@ -45,9 +48,10 @@ the keyboard.
 
 ## Requirements
 
-- Windows 10/11, 64-bit, and a headset with passthrough that streams PC VR.
-- A game that runs in **OpenXR** mode with **Direct3D 11** (Direct3D 12 experimental).
-  Vulkan and OpenGL games aren't supported. SteamVR-only (OpenVR) games don't work, because
+- Windows 10/11, 64-bit, and a headset with passthrough that streams PC VR; or Linux x86-64
+  (glibc 2.35+) with an OpenXR runtime that offers alpha-blended passthrough.
+- A game that runs in **OpenXR** mode with **Direct3D 11** or **Vulkan** (Direct3D 12
+  experimental; Linux: Vulkan). OpenGL games aren't supported. SteamVR-only (OpenVR) games don't work, because
   SteamVR removes the transparency.
 - A streamer or runtime with an **alpha channel** option, or with **colour-key passthrough**
   (e.g. Virtual Desktop).
@@ -66,6 +70,9 @@ the keyboard.
 5. In a game: open **edit mode** with a picture-frame gesture, both grips + triggers, or
    **Ctrl+Alt+E**. Frame your wheel to make a window, adjust it with its handles, then give
    a thumbs up to save.
+
+Linux: download `AlphaViewsXR-<version>-linux.tar.gz`, extract it and run `./install.sh`
+(per user, no root). See [packaging/linux/README.txt](packaging/linux/README.txt).
 
 The full guide, including troubleshooting, is in [packaging/README.txt](packaging/README.txt).
 
@@ -99,17 +106,46 @@ cmake --build build --config Release
 For the 32-bit layer, use `-A Win32` and a separate folder (`build32`). CMake downloads the
 OpenXR SDK headers itself. The version number lives only in `CMakeLists.txt`.
 
+The Vulkan shaders are compiled by `dxc` from the Vulkan SDK when it is installed; otherwise the
+prebuilt SPIR-V headers in `spirv/` are used (`package.ps1` refreshes them).
+
+### Linux
+
+**You need:** GCC 11+ or Clang, CMake 3.20+, Git (Ubuntu: `sudo apt install build-essential cmake git`).
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./packaging/package.sh           # or: the tarball in dist/
+```
+
+CMake downloads the OpenXR and Vulkan headers, DirectXMath and stb_truetype. The guide panel
+pictures come from `packaging/gestures/*_120.bmp` (made on Windows by `gen_gestures.ps1`;
+included in the source package).
+
+### Tests
+
+`tests/` has a pretend OpenXR runtime and game (`-DAVXR_HARNESS=ON`, needs the Vulkan SDK or
+`libvulkan-dev`) that drives the layer with D3D11 or Vulkan and saves what it drew:
+`testsun_harness.ps1` (Windows: compares D3D11 with Vulkan), `tests/run_harness.sh` (Linux;
+Mesa's lavapipe works without a GPU).
+
 ### Project layout
 
 | Path | What it is |
 | --- | --- |
 | `layer.cpp` | The layer: OpenXR hooks, hand and controller input, windows and boxes, edit mode, Direct3D 11 drawing, Direct3D 12 through D3D11On12 |
-| `shaders.hlsl` | Shaders, compiled by `fxc` into headers at build time |
+| `render_vk.h` | Vulkan drawing (Windows and Linux) |
+| `guide_font.h` | Linux: the guide panel's text (stb_truetype) and pictures |
+| `shaders.hlsl` | Shaders, compiled by `fxc` (Direct3D) and `dxc` (SPIR-V, Vulkan) into headers at build time |
+| `spirv/` | Prebuilt SPIR-V shader headers, for builds without `dxc` |
+| `linux/` | Linux manifest, export list and build helpers |
+| `tests/` | Test harness: pretend runtime and game |
 | `version.rc`, `guide_icons.rc` | DLL version info and the guide panel pictures |
 | `XR_APILAYER_GMO_alpha_views_xr.json` | OpenXR layer manifest |
 | `test_scene/` | `AlphaViewsXRTest.exe`, the OpenXR test scene |
-| `packaging/` | Inno Setup script, zip install scripts, user guide, licence files, and `gen_gestures.ps1`, which draws all the control pictures |
-| `package.ps1` | Builds and packages everything |
+| `packaging/` | Inno Setup script, zip install scripts, user guide, licence files, and `gen_gestures.ps1`, which draws all the control pictures; `linux/` and `package.sh` for the Linux tarball |
+| `package.ps1` | Builds and packages everything (the Linux tarball through WSL, when installed) |
 
 ## Licence
 
@@ -121,7 +157,8 @@ version, you must share its source under the same licence. Please give it a diff
 OpenXR layer name (`XR_APILAYER_<you>_...`) so it can't be confused with, or clash with, the
 official layer.
 
-The test scene links the Khronos OpenXR loader (Apache-2.0) and JsonCpp (MIT): see
+The test scene links the Khronos OpenXR loader (Apache-2.0) and JsonCpp (MIT), and the
+Linux layer builds in DirectXMath (MIT) and stb_truetype (MIT / public domain): see
 [THIRD_PARTY_NOTICES.txt](packaging/THIRD_PARTY_NOTICES.txt). Names of games, headsets,
 streaming apps and runtimes belong to their owners; Alpha Views XR isn't made, endorsed or
 supported by any of them.
@@ -130,4 +167,5 @@ supported by any of them.
 
 If Alpha Views XR is useful to you, you can support me on
 [Ko-fi](https://ko-fi.com/virtuallyreal). Bug reports are welcome in [Issues](https://github.com/GmoLargey/Alpha-Views-XR/issues):
-please attach `%LOCALAPPDATA%\AlphaViewsXR\log.txt` from the game that had the problem.
+please attach `%LOCALAPPDATA%\AlphaViewsXR\log.txt` (Linux: `~/.local/share/AlphaViewsXR/log.txt`)
+from the game that had the problem.

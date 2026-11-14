@@ -1,4 +1,4 @@
-ALPHA VIEWS XR  v1.4.4
+ALPHA VIEWS XR  v1.5.0
 by GmoLargey  -  https://github.com/GmoLargey/Alpha-Views-XR
 If you want to support me: https://ko-fi.com/virtuallyreal
 Free, open-source software under the GNU GPL version 3 (see LICENCE at the end).
@@ -26,9 +26,10 @@ Pictures in this folder (also in the Start menu):
 =============================================================================
 You need:
   - Windows 10/11 (64-bit) and a headset with passthrough, streaming PC VR.
-  - A game that runs in OpenXR mode with Direct3D 11 (64-bit or 32-bit). Some VR
-    mods block other OpenXR layers (e.g. the Dead Space VR mod); those can't work.
-    (Direct3D 12: experimental, see section 9. Vulkan / OpenGL: not supported.
+  - A game that runs in OpenXR mode with Direct3D 11 or Vulkan (64-bit or
+    32-bit). Some VR mods block other OpenXR layers (e.g. the Dead Space VR
+    mod); those can't work.
+    (Direct3D 12: experimental, see section 9. OpenGL: not supported.
     SteamVR-only (OpenVR) games don't work: SteamVR removes the transparency.)
 
 Check these:
@@ -75,6 +76,10 @@ Select a window by grabbing it. Its handles then appear, each with a symbol:
   Green box (right of the window, pull towards you to make a box, deeper.
   dotted link)                    Push back flat for a flat window
   Solid box button (beside green) keep box on / off (white while on, section 7)
+  Box faces button (beside keep)  which faces of a box show passthrough: whole box,
+                                  top + far wall, far wall + floor, or all but
+                                  front + floor. Its colour shows the choice
+                                  (section 7)
   Padlock button (above, left)    lock the window's angle: moving it then never
                                   tilts or turns it. Gold while locked
   Purple button (above)           rectangle <-> free shape (section 5)
@@ -197,6 +202,13 @@ pull the green box handle until the box just covers the rim and hub, not the
 dials behind. Keep the game's own wheel visible and lined up with your real one.
 Boxes can be as deep as you like (up to 100 m), e.g. a whole room.
 
+Box faces: tap the box faces button (beside the keep box button) to choose which
+faces of the box let passthrough through. Instead of everything inside the box,
+only the game seen THROUGH those faces is cut out, so the box works like a room
+with real walls: e.g. "top + far wall" for a cockpit with a real ceiling and
+wall ahead, "far wall + floor" for standing in your real room. Game objects in
+front of a face (inside the box) stay visible. Each window keeps its own choice.
+
 Keep box (the opposite): the box shows your room, but whatever the game draws
 inside it stays, e.g. a character standing in your room. Tap the solid box
 button to switch. Keep boxes have a gold outline in edit mode. Keep the bottom
@@ -260,7 +272,7 @@ log.txt (see FILES) says what happened in the last game.
   - Cutouts are black: transparency isn't reaching the headset. Check the
     streamer's alpha option, or use a colour key.
   - "D3D12 game: layer inactive": see section 9.
-  - "not D3D11 or D3D12": unsupported graphics API.
+  - "not D3D11, D3D12 or Vulkan": unsupported graphics API (OpenGL).
   - Looking at handles doesn't highlight them: eye tracking must be on and
     calibrated. Touching the handles always works.
   - "System says hand tracking not supported": turn on hand tracking for PC
@@ -271,9 +283,18 @@ log.txt (see FILES) says what happened in the last game.
 
 
 =============================================================================
+11. LINUX
+=============================================================================
+Alpha Views XR also runs on Linux (x86-64) with OpenXR runtimes such as Monado,
+WiVRn or Steam's, for Vulkan games: AlphaViewsXR-<version>-linux.tar.gz. Run
+./install.sh inside it (no root needed). Everything works as on Windows except
+the Ctrl+Alt keys: use hands or controllers. Its own README.txt has the details.
+
+
+=============================================================================
 INSTALL, FILES, UNINSTALL
 =============================================================================
-Install: run AlphaViewsXR-Setup-1.4.4.exe (asks for admin), or for the zip,
+Install: run AlphaViewsXR-Setup-1.5.0.exe (asks for admin), or for the zip,
 extract it somewhere permanent and double-click Install.bat.
 
 Files, in %LOCALAPPDATA%\AlphaViewsXR:
