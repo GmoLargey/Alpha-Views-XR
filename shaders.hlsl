@@ -38,7 +38,8 @@ cbuffer B : register(b1) {
     float4 rectD;          // depth image rect: x, y, width, height (texels)
     float4 tanLRDU;        // tan of the eye's fov angles: left, right, down, up
     float4 depthMap;       // minDepth, 1 / (maxDepth - minDepth), 1 / nearZ, 1 / farZ
-    float4 info;           // x = 1: game depth available, y = 1: some box has a face mode (shape.w)
+    float4 info;           // x = 1: game depth available, y = 1: some box has a face mode (shape.w),
+                           // z = 1: some window is only partly see-through (opts.x < 1)
     float4 boxCol;         // output colour (alpha 0 = passthrough, or a solid key colour)
 };
 #define MAX_WIN 32         // kMaxWindows in layer.cpp
@@ -48,6 +49,7 @@ struct WinData {
     float4 radii;          // corner radii (corner order as in layer.cpp)
     float4 shape;          // x = free shape point count (0 = rounded rectangle), y = 1: circle, z = box volume,
                            // w = box face mode (0 whole box, 1 top + far wall, 2 far wall + floor, 3 all but front + floor)
+    float4 opts;           // x = see-through: how much room shows (1 all .. 0 none; always 1 with a key colour)
     float4 pts[16];        // free shape points (local x, y), two per float4
 };
 cbuffer W : register(b2) { float4 winCount; WinData wins[MAX_WIN]; };
@@ -191,7 +193,7 @@ float4 psBox(float4 p : SV_POSITION) : SV_TARGET {
     // No game depth: every window shape shows passthrough. (info.y = 1: some box has a face mode;
     // then work each pixel out as if the game drew nothing there, 10 km away.)
     bool noDepth = info.x < 0.5;
-    if (noDepth && info.y < 0.5) return boxCol;
+    if (noDepth && info.y < 0.5 && info.z < 0.5) return boxCol;
     float2 uv = (p.xy - rectC.xy) / rectC.zw;
     float dist = 1e4;
     if (!noDepth) {
@@ -207,36 +209,40 @@ float4 psBox(float4 p : SV_POSITION) : SV_TARGET {
     int best = -1;
     float bestVol = 1e30;
     bool seen = false;               // seen through a flat window or a keep box
+    float seeAmt = 0;                // the most see-through of the windows it's seen through
     [loop] for (int w = 0; w < n; ++w) {
         float kind = wins[w].dim.w;
         float3 l = mul(float4(v, 1), wins[w].toLocal).xyz;
         float3 e = mul(float4(0, 0, 0, 1), wins[w].toLocal).xyz;
+        float ws = wins[w].opts.x;
+        // (A window already counted at full strength can't be beaten: skip the tests.)
+        bool want = !seen || ws > seeAmt;
         if (kind < 0.5) {            // flat window: everything seen through its outline
             float dz = l.z - e.z;
-            if (!seen && abs(dz) > 1e-7) {
+            if (want && abs(dz) > 1e-7) {
                 float s = -e.z / dz;
-                if (s > 0 && InOutline(w, (e + (l - e) * s).xy)) seen = true;
+                if (s > 0 && InOutline(w, (e + (l - e) * s).xy)) { seen = true; seeAmt = max(seeAmt, ws); }
             }
             continue;
         }
         int mode = (int)(wins[w].shape.w + 0.5);
         if (mode > 0) {              // box face mode: only the faces it shows are passthrough
-            if (!seen && CrossesShownFace(w, mode, e, l)) seen = true;
+            if (want && CrossesShownFace(w, mode, e, l)) { seen = true; seeAmt = max(seeAmt, ws); }
             continue;
         }
         if (abs(l.z) <= wins[w].dim.z && InOutline(w, l.xy)) {
             if (wins[w].shape.z < bestVol) { bestVol = wins[w].shape.z; best = w; }
-        } else if ((kind > 1.5 || noDepth) && !seen && Through(w, e, l)) {
-            seen = true;
+        } else if ((kind > 1.5 || noDepth) && want && Through(w, e, l)) {
+            seen = true; seeAmt = max(seeAmt, ws);
         }
     }
     if (best >= 0) {
         if (wins[best].dim.w > 1.5) discard;   // inside a keep box (its innermost box): the game stays
-        return boxCol;
-    }
-    if (seen) return boxCol;
-    discard;
-    return boxCol;
+        seeAmt = max(seeAmt, wins[best].opts.x);
+    } else if (!seen) discard;
+    // Partly see-through: alpha between the game's (1) and passthrough's (boxCol.a). A key colour has
+    // alpha 1 and see 1, so it's unchanged.
+    return float4(boxCol.rgb, lerp(1, boxCol.a, seeAmt));
 }
 
 // Hands behind game objects (Ctrl+Alt+O): the hand cutout spheres, but a pixel is only cut where
@@ -371,6 +377,10 @@ float Glyph(int id, float2 p) {
         d = min(d, Seg(p, float2(-0.42, 0.18), float2(-0.18, 0.42)) - 0.065);
         d = min(d, Seg(p, float2(0.18, -0.42), float2(0.42, -0.18)) - 0.065);
         g = min(d, back);
+    }
+    if (id == 16) {         // see-through: a ring, its left half filled (part game, part room)
+        float r = length(p);
+        g = min(abs(r - 0.42) - 0.07, max(r - 0.42, p.x));
     }
     return g;
 }

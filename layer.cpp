@@ -314,6 +314,9 @@ struct Window {
     // (as before), 1 top + far wall, 2 far wall + floor, 3 all but the front and the floor. In modes
     // 1-3 the faces are walls: the game's surfaces in front of them (or inside the box) stay.
     int boxMode = 0;
+    // See-through (1.5.1, as in Alpha Views VR): how much of the room shows through the window in alpha
+    // mode, 1 all (as before) .. 0 none. Key colours can't be partly see-through: ignored there.
+    float see = 1;
 };
 static const char* kBoxModeName[4] = { "whole box", "top and far wall", "far wall and floor", "all but front and floor" };
 static const wchar_t* kBoxModeNameW[4] = { L"whole box", L"top + far wall", L"far wall + floor", L"all but front + floor" };
@@ -343,6 +346,17 @@ static float SpreadSide(const Window& w) { return FarScale(WinToWorld(w, w.hw, 0
 static float SpreadTop(const Window& w) { return FarScale(WinToWorld(w, 0, w.hh, 0)); }
 static float DepthOut(const Window& w) { return kDepthOut * SpreadSide(w); }
 static XMVECTOR DepthHandle(const Window& w) { return WinToWorld(w, w.hw + DepthOut(w), 0, 0); }
+// See-through slider (alpha mode): outside the left edge, opposite the depth handle. A track of dots from
+// the bottom (0: game only) to the top (1: room only), and a knob at the window's value.
+static const float kSeeOut = 0.075f, kSeeLen = 0.12f, kSeeKnobR = 0.014f, kSeeHit = 0.035f;
+static XMFLOAT2 SeeLocal(const Window& w, float t) {   // t: 0 bottom .. 1 top
+    float s = SpreadSide(w);
+    return { -(w.hw + kSeeOut * s), (t - 0.5f) * kSeeLen * s };
+}
+static float SeeFromLocalY(const Window& w, float y) {   // to the nearest 5 %
+    float t = std::clamp(y / (kSeeLen * SpreadSide(w)) + 0.5f, 0.0f, 1.0f);
+    return roundf(t * 20) / 20;
+}
 static XMFLOAT3 WorldToWin(const Window& w, XMVECTOR p) {
     XMFLOAT3 r; XMStoreFloat3(&r, XMVector3TransformCoord(p, XMMatrixInverse(nullptr, WinMatrix(w))));
     return r;
@@ -578,7 +592,7 @@ struct Inst {
     float gr = 0, gg = 0, gb = 0, ga = 0;
 };
 enum IconId { ICON_DOT, ICON_MOVE, ICON_RESIZE, ICON_ROUND, ICON_DEPTH, ICON_KEEP, ICON_TO_SHAPE, ICON_TO_RECT,
-              ICON_DRAW, ICON_POINT, ICON_ADD, ICON_TO_CIRCLE, ICON_LOCK, ICON_UNLOCK, ICON_SNAP, ICON_FACES };
+              ICON_DRAW, ICON_POINT, ICON_ADD, ICON_TO_CIRCLE, ICON_LOCK, ICON_UNLOCK, ICON_SNAP, ICON_FACES, ICON_SEE };
 
 // CPU copy of Glyph() in shaders.hlsl, for the guide panel's legend. Keep them in step.
 namespace glyph {
@@ -671,6 +685,10 @@ static float Glyph(int id, P p) {
         d = min(d, Seg(p, { 0.18f, -0.42f }, { 0.42f, -0.18f }) - 0.065f);
         return min(d, back);
     }
+    if (id == ICON_SEE) {   // a ring, its left half filled: part game, part room
+        float r = Len(p);
+        return min(fabsf(r - 0.42f) - 0.07f, max(r - 0.42f, p.x));
+    }
     return 1e3f;
 }
 }  // namespace glyph
@@ -685,7 +703,8 @@ enum GrabMode { GRAB_NONE, GRAB_MOVE, GRAB_CORNER, GRAB_RADIUS, GRAB_DEPTH,
                 GRAB_GUIDE,      // the guide panel: move it
                 GRAB_ALL,        // the guide's "move all windows" button: all windows move together
                 GRAB_PRESET,     // a guide preset button (corner = preset 0..2): tap loads, hold saves
-                GRAB_FACESBTN }; // box faces button, past the keep button (boxes only): next face mode
+                GRAB_FACESBTN,   // box faces button, past the keep button (boxes only): next face mode
+                GRAB_SEE };      // see-through slider knob, left of the window (alpha mode): how much room shows
 
 // What a ray (eye gaze or controller laser) is on: a dot of the selected window, or a window.
 struct GazeTarget { GrabMode mode = GRAB_NONE; int win = -1, corner = -1; };
@@ -1071,6 +1090,10 @@ static void SaveKeyMode() {
 static bool UseKeyColour() { return g_keyMode > 0; }
 // Something can show the real world: a key colour, the runtime's alpha blend, or forced alpha.
 static bool CutoutsShown() { return UseKeyColour() || g_alphaSupported || g_forceAlpha; }
+// The see-through slider works in alpha mode only (a key colour mixed with the game no longer keys).
+static bool SeeWorks() { return !UseKeyColour() && CutoutsShown(); }
+// A window's see-through amount as drawn: always all in key colour mode.
+static float SeeOf(const Window& w) { return SeeWorks() ? w.see : 1.0f; }
 
 // Reads a windows file (the game's own, or a preset) into g_windows. False if there's no file.
 static bool ReadWindows(const std::string& path, bool* enabled) {
@@ -1118,7 +1141,12 @@ static bool ReadWindows(const std::string& path, bool* enabled) {
                         w.lock = lock != 0;
                         c += adv;
                         int bm = 0;   // then the box face mode (1.5.0)
-                        if (sscanf(c, "%d", &bm) == 1) w.boxMode = std::clamp(bm, 0, 3);
+                        if (sscanf(c, "%d%n", &bm, &adv) == 1) {
+                            w.boxMode = std::clamp(bm, 0, 3);
+                            c += adv;
+                            float se = 1;   // then the see-through amount (1.5.1)
+                            if (sscanf(c, "%f", &se) == 1 && std::isfinite(se)) w.see = std::clamp(se, 0.0f, 1.0f);
+                        }
                     }
                 }
             }
@@ -1155,7 +1183,7 @@ static bool WriteWindows(const std::string& path) {
             w.rot.x, w.rot.y, w.rot.z, w.rot.w, w.hw, w.hh, w.radius[0], w.radius[1], w.radius[2], w.radius[3],
             0, 0, 0, 0, w.hd, IsShape(w) ? (int)w.pts.size() : 0);
         if (IsShape(w)) for (auto& p : w.pts) fprintf(f, " %f %f", p.x, p.y);
-        fprintf(f, " %d %d %d %d\n", w.keep ? 1 : 0, w.ellipse ? 1 : 0, w.lock ? 1 : 0, w.boxMode);
+        fprintf(f, " %d %d %d %d %.2f\n", w.keep ? 1 : 0, w.ellipse ? 1 : 0, w.lock ? 1 : 0, w.boxMode, w.see);
     }
     fclose(f);
     return true;
@@ -1205,7 +1233,7 @@ struct CB { XMFLOAT4X4 mvp; XMFLOAT4 col, camR, camU; };   // must match cbuffer
 // Must match cbuffer B in shaders.hlsl.
 struct CBBox {
     XMFLOAT4 rectC, rectD, tanLRDU, depthMap;
-    XMFLOAT4 info;                     // x = 1: game depth available
+    XMFLOAT4 info;                     // x = 1: game depth available, y = 1: some box has a face mode, z = 1: some window partly see-through
     XMFLOAT4 col;
 };
 // Must match cbuffer W in shaders.hlsl (MAX_WIN = kMaxWindows): every window, for psBox.
@@ -1214,6 +1242,7 @@ struct WinGPU {
     XMFLOAT4 dim;                      // half width, half height, half depth, kind: 0 flat, 1 box, 2 keep box
     XMFLOAT4 radii;
     XMFLOAT4 shape;                    // x = shape point count (0 = rounded rectangle), y = 1: circle, z = box volume
+    XMFLOAT4 opts;                     // x = see-through (1 all .. 0 none)
     XMFLOAT4 pts[kMaxShapePts / 2];    // shape points, two per float4
 };
 struct CBWin { XMFLOAT4 count; WinGPU win[kMaxWindows]; };
@@ -1459,10 +1488,17 @@ static void HandleKeys() {
         SaveSettings();
     }
     if (kE) SetEdit(!g_edit, "hotkey");
-    // Dev / tests only: ALPHA_VIEWS_EDIT=<frames> turns edit mode on after that many frames.
+    // Dev / tests only: ALPHA_VIEWS_EDIT=<frames> turns edit mode on after that many frames, and
+    // ALPHA_VIEWS_SELECT=<n> selects window n (counted from 1) the first time edit mode is on, so its
+    // handles show.
     {
         static int editAfter = atoi(EnvVar("ALPHA_VIEWS_EDIT").c_str()), frame = 0;
         if (editAfter > 0 && ++frame == editAfter) SetEdit(true, "ALPHA_VIEWS_EDIT");
+        static int selectWin = atoi(EnvVar("ALPHA_VIEWS_SELECT").c_str());
+        if (selectWin > 0 && g_edit) {
+            if (selectWin <= (int)g_windows.size()) g_selected = selectWin - 1;
+            selectWin = 0;
+        }
     }
     if (kN) g_spawnAhead = true;
     if (kG) { g_guideOn = !g_guideOn; Log("Edit-mode guide %s\n", g_guideOn ? "on" : "off"); SaveSettings(); }
@@ -1639,6 +1675,7 @@ static XMVECTOR TargetPoint(const Window& w, GrabMode mode, int corner) {
     if (mode == GRAB_DEPTH) return DepthHandle(w);
     if (mode == GRAB_KEEPBTN) return KeepButton(w);
     if (mode == GRAB_FACESBTN) return FacesButton(w);
+    if (mode == GRAB_SEE) { XMFLOAT2 s = SeeLocal(w, w.see); return WinToWorld(w, s.x, s.y); }
     if (mode == GRAB_CIRCLEBTN) { XMFLOAT2 b = CircleButtonLocal(w); return WinToWorld(w, b.x, b.y); }
     if (mode == GRAB_LOCKBTN) { XMFLOAT2 b = LockButtonLocal(w); return WinToWorld(w, b.x, b.y); }
     if (mode == GRAB_SNAPBTN) { XMFLOAT2 b = SnapButtonLocal(w); return WinToWorld(w, b.x, b.y); }
@@ -1715,6 +1752,7 @@ static GazeTarget RayTarget(XMVECTOR o, XMVECTOR d, float maxDeg, float* len) {
         consider(GRAB_DEPTH, -1);
         consider(GRAB_KEEPBTN, -1);
         if (w.hd > 0) consider(GRAB_FACESBTN, -1);
+        if (SeeWorks()) consider(GRAB_SEE, -1);
         if (!IsShape(w)) consider(GRAB_CIRCLEBTN, -1);
         consider(GRAB_LOCKBTN, -1);
         consider(GRAB_SNAPBTN, -1);
@@ -1801,7 +1839,7 @@ static const char* GrabName(GrabMode m) {
     case GRAB_DEPTH: return "depth"; case GRAB_POINT: return "shape point"; case GRAB_ADDPT: return "add point";
     case GRAB_TYPE: return "type button"; case GRAB_DRAWBTN: return "draw button"; case GRAB_TRACE: return "trace";
     case GRAB_KEEPBTN: return "keep-box button"; case GRAB_CIRCLEBTN: return "circle button";
-    case GRAB_LOCKBTN: return "lock button"; case GRAB_SNAPBTN: return "snap button"; case GRAB_FACESBTN: return "box faces button";
+    case GRAB_LOCKBTN: return "lock button"; case GRAB_SNAPBTN: return "snap button"; case GRAB_FACESBTN: return "box faces button"; case GRAB_SEE: return "see-through slider";
     case GRAB_GUIDE: return "guide panel"; case GRAB_ALL: return "all windows"; case GRAB_PRESET: return "preset button";
     default: return "none";
     }
@@ -2046,6 +2084,7 @@ static void BeginGrab(HandState& h) {
         at(GRAB_TYPE, -1, kButtonHit);
         at(GRAB_KEEPBTN, -1, kButtonHit);
         if (w.hd > 0) at(GRAB_FACESBTN, -1, kButtonHit);
+        if (SeeWorks()) at(GRAB_SEE, -1, kSeeHit);
         if (!IsShape(w)) at(GRAB_CIRCLEBTN, -1, kButtonHit);
         at(GRAB_LOCKBTN, -1, kButtonHit);
         at(GRAB_SNAPBTN, -1, kButtonHit);
@@ -2162,7 +2201,7 @@ static void UpdateGrab(HandState& h) {
     // thumbstick sets the depth while the dot is held.
     if (h.laser && h.mode == GRAB_DEPTH) return;
     XMVECTOR rayPt = V(h.aimO) + V(h.aimD) * h.grabDist;
-    const bool onPlane = h.mode == GRAB_CORNER || h.mode == GRAB_RADIUS || h.mode == GRAB_POINT || h.mode == GRAB_TRACE;
+    const bool onPlane = h.mode == GRAB_CORNER || h.mode == GRAB_RADIUS || h.mode == GRAB_POINT || h.mode == GRAB_TRACE || h.mode == GRAB_SEE;
     // Grabbing only selects: nothing moves until the hand / controller has clearly moved, so
     // pinching or pulling the trigger (which nudges the controller) never shifts the window.
     // Then it starts from there, without a jump. (Tracing starts straight away.)
@@ -2252,6 +2291,8 @@ static void UpdateGrab(HandState& h) {
         // where it is. Pushed back to ~1 cm: flat.
         float z = h.winStartHd + WorldToWin(w, p).z;
         w.hd = z < 0.01f ? 0 : std::min(z, kMaxHalfDepth);
+    } else if (h.mode == GRAB_SEE) {
+        w.see = SeeFromLocalY(w, WorldToWin(w, p).y);
     } else if (h.mode == GRAB_POINT && h.corner >= 0 && h.corner < (int)w.pts.size()) {
         XMFLOAT3 l = WorldToWin(w, p);
         w.pts[h.corner] = { l.x, l.y };
@@ -2304,6 +2345,7 @@ static void EndGrab(HandState& h, double now) {
             return;
         }
         if (h.mode == GRAB_DEPTH) Log("Window %d depth %.0f cm%s\n", h.win, w.hd * 200, w.hd > 0 ? "" : " (flat)");
+        if (h.mode == GRAB_SEE) Log("Window %d shows %.0f%% room\n", h.win, w.see * 100);
         if (h.mode == GRAB_POINT && IsShape(w)) {
             // A quick tap on a point removes it (a shape keeps at least 3).
             if (tap && !h.newPoint && w.pts.size() > 3 && h.corner >= 0 && h.corner < (int)w.pts.size()) {
@@ -2419,6 +2461,7 @@ static void GuideContent(GuideData& g) {
         else if (w.ellipse) t += L", circle";
         g.win.push_back({ 0, L"Type: " + t });
         if (w.hd > 0) g.win.push_back({ 0, std::wstring(L"Box faces: ") + kBoxModeNameW[std::clamp(w.boxMode, 0, 3)] });
+        if (w.see < 1) g.win.push_back({ 0, Fmt(L"See-through: %.0f%% room%ls", w.see * 100, SeeWorks() ? L"" : L" (alpha mode only)") });
         g.win.push_back({ 0, L"Distance: " + ShortDist(Dist(g_head, V(w.pos))) });
     } else if (g_windows.empty()) {
         g.win.push_back({ 2, L"No windows yet" });
@@ -2666,6 +2709,7 @@ static void RenderGuide() {
         { ICON_ADD, { 1, 0.78f, 0.55f }, {}, false, 0, L"add point" },
         { ICON_LOCK, { 0.98f, 0.76f, 0.12f }, {}, false, 0, L"lock angle" },
         { ICON_SNAP, { 0.55f, 0.8f, 1 }, { 0.08f, 0.09f, 0.11f }, true, 0, L"snap upright / level" },
+        { ICON_SEE, { 0.8f, 0.8f, 0.8f }, {}, false, 0, L"see-through" },
     };
     struct Placed { int x, y; };
     Placed placed[_countof(legend)];
@@ -3390,6 +3434,28 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
                 if (active) icon(DepthHandle(w), dr, ICON_DEPTH, 1, 0.9f, 0.2f, face, face);
                 else icon(DepthHandle(w), dr, ICON_DEPTH, hover ? 0.3f : 0.1f, hover ? 0.9f : 0.68f, hover ? 0.4f : 0.22f, face, face);
             }
+            // see-through slider (alpha mode): a track of dots, lit up to the knob, and the knob (half-filled
+            // ring). Grab the knob and slide it: top = room only, bottom = game only.
+            if (SeeWorks()) {
+                XMVECTOR knob = TargetPoint(w, GRAB_SEE, -1);
+                bool active = false, hover = RayOn(GRAB_SEE, wi, -1);
+                for (auto& h : g_hand) {
+                    if (h.win == wi && h.mode == GRAB_SEE) active = true;
+                    if (h.active && Dist(V(h.pinchPt), knob) < kSeeHit) hover = true;
+                }
+                const float ss = SpreadSide(w), kr = kSeeKnobR * (hover || active ? 1.25f : 1.0f);
+                const int dots = 13;
+                for (int k = 0; k < dots; ++k) {
+                    float t = (float)k / (dots - 1);
+                    if (fabsf(t - w.see) * kSeeLen < kr * 1.1f) continue;   // under the knob
+                    float b = t <= w.see ? 0.9f : 0.42f;
+                    XMFLOAT2 l = SeeLocal(w, t);
+                    XMFLOAT3 p; XMStoreFloat3(&p, WinToWorld(w, l.x, l.y));
+                    g_uiInst.push_back({ p.x, p.y, p.z, 0.003f * ss, b, b, b, 1 });
+                }
+                if (active) icon(knob, kr, ICON_SEE, 1, 0.9f, 0.2f, face, face);
+                else { float b = hover ? 0.95f : 0.8f; icon(knob, kr, ICON_SEE, b, b, b, face, face); }
+            }
             auto gazeOn = [&](GrabMode m, int k) {
                 return RayOn(m, wi, k);
             };
@@ -3683,6 +3749,16 @@ struct DrawView {
     ViewDepth depth;
 };
 
+// Is any window partly see-through (alpha mode)? Then every window goes through psBox, which mixes
+// each pixel by the see-through of the windows it's in.
+static bool AnyPartialWindow() {
+    if (!SeeWorks()) return false;
+    for (const Window& w : g_windows) if (w.see < 1) return true;
+    return false;
+}
+// Windows drawn by psBox (else flat windows only, cut whole with psConst).
+static bool BoxPass() { return !g_boxDraws.empty() || AnyPartialWindow(); }
+
 // psBox's constants for one view (cbuffers B and W): the view's rects, fov and depth mapping, and
 // every window in this eye's view space. Returns false if the game's depth can't be used after all
 // (an empty depth range); then info.x = 0 and psBox works without it.
@@ -3698,7 +3774,7 @@ static bool FillBoxCB(const DrawView& pv, XMMATRIX cam, bool haveDepth, const XM
     bb.depthMap = { vd.minDepth, fabsf(range) > 1e-6f ? 1.0f / range : 0.0f, inv(vd.nearZ), inv(vd.farZ) };
     bb.col = col;
     if (fabsf(range) <= 1e-6f) haveDepth = false;
-    bool anyFaces = false;
+    bool anyFaces = false, anyPartial = false;
     int nw = std::min((int)g_windows.size(), kMaxWindows);
     wb.count = { (float)nw, 0, 0, 0 };
     for (int wi = 0; wi < nw; ++wi) {
@@ -3712,12 +3788,14 @@ static bool FillBoxCB(const DrawView& pv, XMMATRIX cam, bool haveDepth, const XM
         float faceMode = w.hd > 0 ? (float)std::clamp(w.boxMode, 0, 3) : 0.0f;
         if (faceMode > 0) anyFaces = true;
         g.shape = { (float)np, (!np && w.ellipse) ? 1.0f : 0.0f, 8 * w.hw * w.hh * w.hd, faceMode };
+        g.opts = { SeeOf(w), 0, 0, 0 };
+        if (g.opts.x < 1) anyPartial = true;
         for (int k = 0; k < np; ++k) {
             float* q = &g.pts[k / 2].x + (k & 1) * 2;
             q[0] = w.pts[k].x; q[1] = w.pts[k].y;
         }
     }
-    bb.info = { haveDepth ? 1.0f : 0.0f, anyFaces ? 1.0f : 0.0f, 0, 0 };
+    bb.info = { haveDepth ? 1.0f : 0.0f, anyFaces ? 1.0f : 0.0f, anyPartial ? 1.0f : 0.0f, 0 };
     return haveDepth;
 }
 
@@ -3915,19 +3993,21 @@ static void DrawMaskD3D(const std::vector<DrawView>& dviews) {
             g_ctx->IASetInputLayout(g_ilMesh);
             g_ctx->IASetVertexBuffers(0, 1, &g_winVB, &stride, &off);
             g_ctx->VSSetShader(g_vsMesh, nullptr, 0);
-            if (g_boxDraws.empty()) {   // flat windows only: cut their whole outline
+            if (!BoxPass()) {   // flat windows only, fully see-through: cut their whole outline
                 g_ctx->PSSetShader(g_psConst, nullptr, 0);
                 g_ctx->Draw(g_flatVerts, 0);
             } else {
                 // Any box: every window's triangles go through psBox, which looks at all windows per
                 // pixel, so overlapping windows combine (the innermost box containing the game's
                 // surface decides it: normal box = passthrough, keep box = the game stays).
-                ID3D11ShaderResourceView* depth = ViewDepthSRV();
+                // (The game's depth only matters to boxes: partly see-through flat windows don't need it.)
+                const bool anyBox = !g_boxDraws.empty();
+                ID3D11ShaderResourceView* depth = anyBox ? ViewDepthSRV() : nullptr;
                 int ds = depth ? 1 : 0;
-                if (ds != g_depthRead)   // log changes only (reset each session)
+                if (anyBox && ds != g_depthRead)   // log changes only (reset each session)
                     Log(depth ? "Box windows: using the game's depth.\n"
                               : "Box windows: no game depth this view, boxes act as solid blocks.\n");
-                g_depthRead = ds;
+                if (anyBox) g_depthRead = ds;
                 static CBBox bb;
                 static CBWin wb;   // ~12 KB: not on the stack
                 if (!FillBoxCB(pv, cam, depth != nullptr, cb.col, bb, wb)) depth = nullptr;

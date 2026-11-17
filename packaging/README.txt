@@ -1,4 +1,4 @@
-ALPHA VIEWS XR  v1.5.0
+ALPHA VIEWS XR  v1.5.1
 by GmoLargey  -  https://github.com/GmoLargey/Alpha-Views-XR
 If you want to support me: https://ko-fi.com/virtuallyreal
 Free, open-source software under the GNU GPL version 3 (see LICENCE at the end).
@@ -80,6 +80,9 @@ Select a window by grabbing it. Its handles then appear, each with a symbol:
                                   top + far wall, far wall + floor, or all but
                                   front + floor. Its colour shows the choice
                                   (section 7)
+  Half-filled ring (left of the   see-through: slide it up for more room, down for
+  window, on a dotted track)      more game (100% = only the room, the default).
+                                  Alpha passthrough only: not shown with a key colour
   Padlock button (above, left)    lock the window's angle: moving it then never
                                   tilts or turns it. Gold while locked
   Purple button (above)           rectangle <-> free shape (section 5)
@@ -294,7 +297,7 @@ the Ctrl+Alt keys: use hands or controllers. Its own README.txt has the details.
 =============================================================================
 INSTALL, FILES, UNINSTALL
 =============================================================================
-Install: run AlphaViewsXR-Setup-1.5.0.exe (asks for admin), or for the zip,
+Install: run AlphaViewsXR-Setup-1.5.1.exe (asks for admin), or for the zip,
 extract it somewhere permanent and double-click Install.bat.
 
 Files, in %LOCALAPPDATA%\AlphaViewsXR:

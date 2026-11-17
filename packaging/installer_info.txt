@@ -1,4 +1,4 @@
-ALPHA VIEWS XR  v1.5.0  by GmoLargey
+ALPHA VIEWS XR  v1.5.1  by GmoLargey
 https://github.com/GmoLargey/Alpha-Views-XR
 If you want to support me: https://ko-fi.com/virtuallyreal
 Free, open-source software (GNU GPL version 3).
@@ -6,23 +6,14 @@ See your real hands, steering wheel and flight controls inside PC VR games with
 added depth support, using your headset's passthrough camera.
 
 NEW IN THIS VERSION
-- Lock button (padlock, above the window, left end): locks the window's angle.
-  Moving it then never tilts or turns it. Gold while locked. Saved per window.
-- Snap button (pale blue, above the window, right end): squares the window up
-  with the game world, facing you. The first press stands a tilted window back
-  upright; each further press switches between upright facing forward, upright
-  facing the side, and lying level.
-- Boxes can now be as deep as you like (up to 100 m, was 1 m). The thumbstick
-  speeds up on deep boxes.
-- The green box handle and the keep-box button now sit on the middle line of
-  the box, a little further out, so they stay put on deep boxes and keep clear
-  of the corner handles on short windows.
-- Shrinking a window with a corner only deletes it when you shrink it below
-  2 cm, so short windows no longer vanish when you touch a corner.
-- Unreal Engine 4 games (e.g. Hubris): windows now stay put in the world
-  instead of following your head.
-- Earlier: circle windows, free shapes, keep boxes, key colours, presets and
-  more (see README.txt).
+- See-through slider (half-filled ring, left of the selected window): choose
+  how much of your room shows through each window, from 100% (only the room,
+  as before) down to 0% (only the game). Saved per window. Works with alpha
+  passthrough; key colours can't be partly see-through, so it's hidden then.
+- From 1.5.0: Vulkan games, a Linux version, and box faces (choose which faces
+  of a box show your room, like real walls).
+- Earlier: lock and snap buttons, deep boxes, circle windows, free shapes, keep
+  boxes, key colours, presets and more (see README.txt).
 
 BEFORE YOU START
 - Windows 10/11 (64-bit), and a headset with passthrough streaming PC VR.

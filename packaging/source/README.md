@@ -27,6 +27,8 @@ the keyboard.
   wall + floor, or all but front + floor), so a box can act like a room with real walls.
 - **Keep boxes:** the opposite. The box shows your room, but whatever the game draws inside it
   (a character, a cockpit display) stays.
+- **See-through slider:** choose how much of your room shows through each window, from 100%
+  (only the room) down to only the game, with alpha passthrough.
 - **Hands behind objects:** game surfaces closer than your hand cover it.
 - **Alpha or colour key:** transparent cutouts on runtimes with an alpha channel, or cutouts
   painted green, blue or pink for streamers with colour-key passthrough. Saved per runtime.

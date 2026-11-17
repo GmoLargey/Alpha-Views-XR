@@ -740,17 +740,17 @@ static void DrawMaskVk(const std::vector<DrawView>& dviews) {
                 VkBlend bl = keyed || g_visualize ? VB_ALL : VB_ALPHA_ONLY;
                 uint32_t offC = pushUbo(&cb, sizeof cb);
                 VkDeviceSize vo = offWin;
-                if (g_boxDraws.empty()) {   // flat windows only: cut their whole outline
+                if (!BoxPass()) {   // flat windows only, fully see-through: cut their whole outline
                     if (use(VP_MESH_CONST, bl, offC)) {
                         f.vkCmdBindVertexBuffers(s.cmd, 0, 1, &s.buf.buf, &vo);
                         f.vkCmdDraw(s.cmd, g_flatVerts, 1, 0, 0);
                     }
                 } else {
                     int ds = depth.view ? 1 : 0;
-                    if (ds != g_depthRead)   // log changes only (reset each session)
+                    if (boxes && ds != g_depthRead)   // log changes only (reset each session); boxes only
                         Log(depth.view ? "Box windows: using the game's depth.\n"
                                        : "Box windows: no game depth this view, boxes act as solid blocks.\n");
-                    g_depthRead = ds;
+                    if (boxes) g_depthRead = ds;
                     static CBBox bb;
                     static CBWin wb;
                     FillBoxCB(pv, cam, depth.view != VK_NULL_HANDLE, cb.col, bb, wb);
