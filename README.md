@@ -4,8 +4,9 @@
 
 Alpha Views XR is an OpenXR API layer that cuts see-through sections into PC VR games, so your
 headset's passthrough camera shows your real room there. It works with the runtime's alpha
-channel where supported, or with green / blue / pink colour-key passthrough (e.g. Virtual
-Desktop). With games that share their depth, windows become 3D boxes and your hands hide behind
+channel where supported, with green / blue / pink colour-key passthrough (e.g. Virtual
+Desktop), or, on SteamVR headsets with cameras (Valve Index, Reverb G2 with Oasis, ...), with
+the headset camera's own picture. With games that share their depth, windows become 3D boxes and your hands hide behind
 game objects correctly. Everything is set up in the headset with hand tracking, controllers or
 the keyboard.
 
@@ -28,10 +29,11 @@ the keyboard.
 - **Keep boxes:** the opposite. The box shows your room, but whatever the game draws inside it
   (a character, a cockpit display) stays.
 - **See-through slider:** choose how much of your room shows through each window, from 100%
-  (only the room) down to only the game, with alpha passthrough.
+  (only the room) down to only the game, with alpha passthrough or the headset camera.
 - **Hands behind objects:** game surfaces closer than your hand cover it.
-- **Alpha or colour key:** transparent cutouts on runtimes with an alpha channel, or cutouts
-  painted green, blue or pink for streamers with colour-key passthrough. Saved per runtime.
+- **Alpha, colour key or camera:** transparent cutouts on runtimes with an alpha channel, cutouts
+  painted green, blue or pink for streamers with colour-key passthrough, or the headset camera's
+  picture through SteamVR (Index, Vive Pro, G2 with Oasis...; chosen automatically). Saved per runtime.
 - **Three ways to edit:** hand gestures, controllers (with a laser for headsets without eye
   tracking), or keyboard shortcuts. An in-headset guide panel shows the controls.
 - **Presets:** save and restore three window layouts per game.

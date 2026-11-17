@@ -22,6 +22,8 @@ stage=$(mktemp -d)
 out="$stage/$name"
 mkdir -p "$out"
 cp "$so" "$root/linux/XR_APILAYER_GMO_alpha_views_xr.json" "$root/packaging/linux/install.sh" "$root/packaging/linux/uninstall.sh" "$out/"
+# OpenVR library (camera mode with SteamVR), copied beside the layer by the build.
+cp "$build/libopenvr_api.so" "$out/"
 cp "$root/packaging/LICENSE.txt" "$root/packaging/THIRD_PARTY_NOTICES.txt" "$out/"
 for p in Gestures Controllers Shapes; do
     [ -f "$root/packaging/gestures/$p.png" ] && cp "$root/packaging/gestures/$p.png" "$out/"
@@ -30,7 +32,7 @@ sed "s/@VERSION@/$version/g" "$root/packaging/linux/README.txt" > "$out/README.t
 # Plain permissions (a Windows drive under WSL makes everything 777).
 find "$out" -type d -exec chmod 755 {} +
 find "$out" -type f -exec chmod 644 {} +
-chmod 755 "$out/install.sh" "$out/uninstall.sh" "$out/libXR_APILAYER_GMO_alpha_views_xr.so"
+chmod 755 "$out/install.sh" "$out/uninstall.sh" "$out/libXR_APILAYER_GMO_alpha_views_xr.so" "$out/libopenvr_api.so"
 tar -C "$stage" --owner=0 --group=0 --numeric-owner -czf "$root/dist/$name.tar.gz" "$name"
 rm -rf "$stage"
 echo "Made $root/dist/$name.tar.gz"

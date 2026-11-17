@@ -1,4 +1,4 @@
-ALPHA VIEWS XR  v1.5.1
+ALPHA VIEWS XR  v1.6.0
 by GmoLargey  -  https://github.com/GmoLargey/Alpha-Views-XR
 If you want to support me: https://ko-fi.com/virtuallyreal
 Free, open-source software under the GNU GPL version 3 (see LICENCE at the end).
@@ -44,6 +44,10 @@ Check these:
      b) COLOUR KEY: if it can't, use its colour-key passthrough feature
         (e.g. Virtual Desktop), and set Alpha Views XR to paint cutouts that
         colour (Ctrl+Alt+C, see section 6).
+     c) HEADSET CAMERA (SteamVR): on a headset whose cameras SteamVR can use
+        (Valve Index, Vive Pro, Reverb G2 with the Oasis driver, ...), with
+        SteamVR as the OpenXR runtime, cutouts show the headset camera's
+        picture. Nothing to set up: it's chosen automatically (section 6).
 
 Try it first with the test scene (Start menu: "Alpha Views XR test scene"). It
 shows a spinning cube just below eye level, within reach: put a hand behind it
@@ -82,7 +86,7 @@ Select a window by grabbing it. Its handles then appear, each with a symbol:
                                   (section 7)
   Half-filled ring (left of the   see-through: slide it up for more room, down for
   window, on a dotted track)      more game (100% = only the room, the default).
-                                  Alpha passthrough only: not shown with a key colour
+                                  Alpha and camera modes: not shown with a key colour
   Padlock button (above, left)    lock the window's angle: moving it then never
                                   tilts or turns it. Gold while locked
   Purple button (above)           rectangle <-> free shape (section 5)
@@ -178,14 +182,25 @@ For any outline other than a rounded rectangle (a wheel rim, a button box):
 
 
 =============================================================================
-6. CUTOUT COLOUR (alpha or colour key)
+6. CUTOUT COLOUR (alpha, colour key or headset camera)
 =============================================================================
   alpha   cutouts are transparent (needs an alpha channel, section 1)
   green / blue / pink   cutouts are painted that colour, for a streamer or
           runtime that swaps a colour for passthrough (colour key)
-Change it with Ctrl+Alt+C, a V sign or a thumbstick press (edit mode). Then set
-your streamer's colour-key passthrough to the same colour.
+  camera  cutouts show the headset camera's picture (SteamVR only, on headsets
+          whose cameras SteamVR can use). The game's frames stay solid, so no
+          alpha channel or colour key is needed. Chosen automatically when
+          SteamVR has a headset camera, unless you picked something else while
+          it was there.
+Change it with Ctrl+Alt+C, a V sign or a thumbstick press (edit mode): alpha,
+green, blue, pink, then camera (only when there is one). For a colour, set your
+streamer's colour-key passthrough to the same colour.
   - Saved per runtime, so one can use alpha while another uses a colour.
+  - Camera mode: the picture is placed at each window's distance (and on your
+    hands), so things near the window line up best. The guide panel's STATUS
+    shows the camera ("showing", "waiting for pictures"...). It uses one camera
+    for both eyes. camera.cfg (optional, in the settings folder) can choose
+    another: frame=1|2, pose=0|1, camera=N (as in Alpha Views VR).
   - Pick a colour the game doesn't use much, or those parts key out too.
   - Boxes still use the game's depth, so they key out the same way (no depth:
     the box is a plain cube of colour).
@@ -274,6 +289,9 @@ log.txt (see FILES) says what happened in the last game.
     alpha channel, or use a colour key (section 6).
   - Cutouts are black: transparency isn't reaching the headset. Check the
     streamer's alpha option, or use a colour key.
+  - Camera mode shows the game in the windows: see the "Camera" lines in the
+    log ("couldn't start", "STAGE space not located"...). The camera picture
+    only covers what the camera sees; elsewhere the game stays.
   - "D3D12 game: layer inactive": see section 9.
   - "not D3D11, D3D12 or Vulkan": unsupported graphics API (OpenGL).
   - Looking at handles doesn't highlight them: eye tracking must be on and
@@ -297,7 +315,7 @@ the Ctrl+Alt keys: use hands or controllers. Its own README.txt has the details.
 =============================================================================
 INSTALL, FILES, UNINSTALL
 =============================================================================
-Install: run AlphaViewsXR-Setup-1.5.1.exe (asks for admin), or for the zip,
+Install: run AlphaViewsXR-Setup-1.6.0.exe (asks for admin), or for the zip,
 extract it somewhere permanent and double-click Install.bat.
 
 Files, in %LOCALAPPDATA%\AlphaViewsXR:

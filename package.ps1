@@ -53,6 +53,10 @@ Copy-Item "$root\build\Release\XR_APILAYER_GMO_alpha_views_xr.dll" $stage
 Copy-Item "$root\XR_APILAYER_GMO_alpha_views_xr.json" $stage
 New-Item -ItemType Directory -Force "$stage\x86" | Out-Null
 Copy-Item "$b32\Release\XR_APILAYER_GMO_alpha_views_xr.dll", "$root\XR_APILAYER_GMO_alpha_views_xr.json" "$stage\x86"
+# OpenVR library (camera mode with SteamVR), beside each layer; copied there by the build.
+Copy-Item "$root\build\Release\openvr_api.dll" $stage
+Copy-Item "$b32\Release\openvr_api.dll" "$stage\x86"
+if ((Get-Item "$stage\openvr_api.dll").Length -eq (Get-Item "$stage\x86\openvr_api.dll").Length) { throw 'openvr_api.dll: 32 and 64-bit copies look the same' }
 Copy-Item "$test\build-static\Release\AlphaPassthroughTest.exe" "$stage\AlphaViewsXRTest.exe"
 Copy-Item "$root\packaging\README.txt" $stage
 Copy-Item "$root\packaging\LICENSE.txt", "$root\packaging\THIRD_PARTY_NOTICES.txt" $stage
@@ -82,7 +86,7 @@ if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
 # Build output, generated pictures, debug dumps and personal window files are left out.
 $src = Join-Path $dist "AlphaViewsXR-$ver-source"
 New-Item -ItemType Directory -Force "$src\packaging\source", "$src\test_scene" | Out-Null
-Copy-Item "$root\layer.cpp", "$root\render_vk.h", "$root\guide_font.h", "$root\shaders.hlsl", "$root\CMakeLists.txt", "$root\version.rc", "$root\guide_icons.rc",
+Copy-Item "$root\layer.cpp", "$root\render_vk.h", "$root\camera_vr.h", "$root\guide_font.h", "$root\shaders.hlsl", "$root\CMakeLists.txt", "$root\version.rc", "$root\guide_icons.rc",
     "$root\XR_APILAYER_GMO_alpha_views_xr.json", "$root\package.ps1", "$root\install.ps1", "$root\uninstall.ps1" $src
 # Vulkan shaders (prebuilt), Linux build files, test harness.
 New-Item -ItemType Directory -Force "$src\spirv", "$src\linux", "$src\tests", "$src\packaging\linux", "$src\packaging\gestures" | Out-Null

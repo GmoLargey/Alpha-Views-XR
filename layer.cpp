@@ -270,6 +270,7 @@ static PFN_xrSyncActions nSyncActions;
 static PFN_xrGetActionStateFloat nGetActionStateFloat;
 static PFN_xrCreateActionSpace nCreateActionSpace;
 static PFN_xrLocateSpace nLocateSpace;
+static PFN_xrCreateReferenceSpace nCreateReferenceSpace;
 static PFN_xrDestroySpace nDestroySpace;
 static PFN_xrDestroyActionSet nDestroyActionSet;
 static PFN_xrPathToString nPathToString;
@@ -854,10 +855,14 @@ static bool g_forceAlpha = false;    // set layer alpha flags without ALPHA_BLEN
 // How cutouts show the real world. 0 = alpha: transparent, the runtime's own passthrough shows through
 // (needs ALPHA_BLEND or force alpha). 1-3 = key colour: cutouts are painted solid green / blue / pink so a
 // streamer that chroma-keys (e.g. Virtual Desktop) swaps that colour for its passthrough.
+// 4 = camera (1.6.0, SteamVR only): cutouts are painted with the headset camera's picture (camera_vr.h).
 // Ctrl+Alt+C cycles it. Saved per runtime, so PICO can stay on alpha while Virtual Desktop uses a colour.
+static const int KEY_CAMERA = 4, kKeyModes = 5;
 static int g_keyMode = 0;
-static const float kKeyCol[4][3] = { { 0, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 1, 0, 1 } };
-static const wchar_t* kKeyName[4] = { L"alpha", L"green", L"blue", L"pink" };
+static bool g_keyChosenWithCam = false;   // the saved mode was picked while a headset camera was there
+// Colours of the modes (the camera's is only the V sign's preview dot).
+static const float kKeyCol[kKeyModes][3] = { { 0, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 1, 0, 1 }, { 1, 0.55f, 0.1f } };
+static const wchar_t* kKeyName[kKeyModes] = { L"alpha", L"green", L"blue", L"pink", L"camera" };
 static bool UseKeyColour();
 static bool CutoutsShown();
 static const int kGuideW = 2300, kGuideH = 1340;
@@ -962,6 +967,11 @@ static ID3D11BlendState* g_bsAlphaOnly = nullptr;
 static ID3D11BlendState* g_bsAll = nullptr;
 static ID3D11RasterizerState* g_rs = nullptr;
 static ID3D11DepthStencilState* g_dss = nullptr;
+// Camera mode: cbuffer K and the camera picture.
+static ID3D11Buffer* g_cbCam = nullptr;
+static ID3D11Texture2D* g_camTex = nullptr;
+static ID3D11ShaderResourceView* g_camSrv = nullptr;
+static uint32_t g_camTexW = 0, g_camTexH = 0, g_camTexSeq = 0;
 
 template <class T> static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
 #endif
@@ -1003,6 +1013,7 @@ static void ReleaseD3D() {
     SafeRelease(g_dss); SafeRelease(g_rs); SafeRelease(g_bsAll); SafeRelease(g_bsAlphaOnly);
     SafeRelease(g_instVB); SafeRelease(g_sphereIB); SafeRelease(g_sphereVB); SafeRelease(g_winVB); SafeRelease(g_cb);
     SafeRelease(g_cbBox); SafeRelease(g_cbWin);
+    SafeRelease(g_cbCam); SafeRelease(g_camSrv); SafeRelease(g_camTex); g_camTexW = g_camTexH = g_camTexSeq = 0;
     SafeRelease(g_sampLinear); SafeRelease(g_guideSrvUnorm); SafeRelease(g_guideSrvSrgb); SafeRelease(g_guideTex);
     SafeRelease(g_panelVB); SafeRelease(g_ilPanel); SafeRelease(g_psPanel); SafeRelease(g_vsPanel);
     SafeRelease(g_vsSphereD); SafeRelease(g_psHandD);
@@ -1066,6 +1077,9 @@ static bool VirtualDesktopRunning() {
 #endif
 }
 static bool g_viaVD = false;   // SteamVR runtime, streamed by Virtual Desktop
+
+#include "camera_vr.h"
+
 // Key colour mode, saved per runtime (key_<runtime>.cfg). SteamVR through Virtual Desktop shares
 // VDXR's file: same headset, same VD passthrough setting.
 static std::string KeyModePath() {
@@ -1075,22 +1089,30 @@ static std::string KeyModePath() {
 }
 static void LoadKeyMode() {
     g_keyMode = 0;
+    g_keyChosenWithCam = false;
     FILE* f = fopen(KeyModePath().c_str(), "r");
     if (!f) return;
-    int m = 0;
-    if (fscanf(f, "%d", &m) == 1 && m >= 0 && m < 4) g_keyMode = m;
+    int m = 0, c = 0;   // the mode, then (1.6.0) 1 if it was picked while a headset camera was there
+    if (fscanf(f, "%d", &m) == 1 && m >= 0 && m < kKeyModes) g_keyMode = m;
+    if (fscanf(f, "%d", &c) == 1) g_keyChosenWithCam = c != 0;
     fclose(f);
 }
 static void SaveKeyMode() {
     FILE* f = fopen(KeyModePath().c_str(), "w");
     if (!f) return;
-    fprintf(f, "%d\n", g_keyMode);
+    g_keyChosenWithCam = g_camAvailable;
+    fprintf(f, "%d %d\n", g_keyMode, g_keyChosenWithCam ? 1 : 0);
     fclose(f);
 }
-static bool UseKeyColour() { return g_keyMode > 0; }
-// Something can show the real world: a key colour, the runtime's alpha blend, or forced alpha.
-static bool CutoutsShown() { return UseKeyColour() || g_alphaSupported || g_forceAlpha; }
-// The see-through slider works in alpha mode only (a key colour mixed with the game no longer keys).
+static bool UseKeyColour() { return g_keyMode > 0 && g_keyMode < KEY_CAMERA; }
+static bool UseCamera() { return g_keyMode == KEY_CAMERA; }
+// Cutouts drawn solid into the game's picture (a key colour or the camera), not made transparent.
+static bool OpaqueCutouts() { return UseKeyColour() || UseCamera(); }
+// Something can show the real world: a key colour, the camera, the runtime's alpha blend, or forced alpha.
+static bool CutoutsShown() { return OpaqueCutouts() || g_alphaSupported || g_forceAlpha; }
+// The mode after m: alpha -> green -> blue -> pink -> camera (only with a headset camera) -> alpha.
+static int NextKeyMode(int m) { int n = (m + 1) % kKeyModes; return n == KEY_CAMERA && !g_camAvailable ? 0 : n; }
+// The see-through slider works in alpha and camera modes (a key colour mixed with the game no longer keys).
 static bool SeeWorks() { return !UseKeyColour() && CutoutsShown(); }
 // A window's see-through amount as drawn: always all in key colour mode.
 static float SeeOf(const Window& w) { return SeeWorks() ? w.see : 1.0f; }
@@ -1363,6 +1385,8 @@ static bool InitD3D(ID3D11Device* device) {
     g_dev->CreateBuffer(&bd, nullptr, &g_cbBox);
     bd = { sizeof(CBWin), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER };
     g_dev->CreateBuffer(&bd, nullptr, &g_cbWin);
+    bd = { sizeof(CBCam), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER };
+    g_dev->CreateBuffer(&bd, nullptr, &g_cbCam);
 
     D3D11_BLEND_DESC bld{};
     bld.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALPHA;
@@ -1463,8 +1487,9 @@ static void SetEdit(bool on, const char* why) {
 #endif
 // Next cutout colour: alpha -> green -> blue -> pink (Ctrl+Alt+C, V sign, thumbstick press).
 static void CycleKeyMode(const char* why) {
-    g_keyMode = (g_keyMode + 1) % 4;
+    g_keyMode = NextKeyMode(g_keyMode);
     Log("Cutouts: %ls%s (%s, for %s)\n", kKeyName[g_keyMode],
+        UseCamera() ? " (the headset camera's picture, through SteamVR)" :
         g_keyMode ? " key colour, for streamers that chroma-key it to passthrough" :
         CutoutsShown() ? " (transparent)" : " (transparent, but this runtime shows no passthrough for it)",
         why, g_runtimeName.c_str());
@@ -2489,8 +2514,11 @@ static void GuideContent(GuideData& g) {
     g.status.push_back({ 0, Widen("Runtime: " + g_runtimeName + (g_viaVD ? " (Virtual Desktop)" : "")) });
     if (g_alphaSupported) g.status.push_back({ 0, L"Alpha channel: supported" });
     else if (g_forceAlpha) g.status.push_back({ 0, L"Alpha channel: forced on" });
-    else g.status.push_back({ UseKeyColour() ? 0 : 1, L"Alpha channel: unsupported (missing from streamer)" });
-    if (UseKeyColour()) g.status.push_back({ 0, L"Cutout colour: " + std::wstring(kKeyName[g_keyMode]) + L" screen" });
+    else g.status.push_back({ OpaqueCutouts() ? 0 : 1, L"Alpha channel: unsupported (missing from streamer)" });
+    if (UseCamera()) {
+        std::string st = CamStatus();
+        g.status.push_back({ st.rfind("showing", 0) == 0 ? 0 : 1, L"Cutouts: headset camera, " + Widen(st) });
+    } else if (UseKeyColour()) g.status.push_back({ 0, L"Cutout colour: " + std::wstring(kKeyName[g_keyMode]) + L" screen" });
     else if (CutoutsShown()) g.status.push_back({ 0, L"Cutout colour: clear" });
     else g.status.push_back({ 1, L"Use Change cutout colour (above) for a green screen" });
     bool hl = g_hand[0].active, hr = g_hand[1].active;
@@ -2857,6 +2885,25 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
     g_head = head;
     g_maskInst.clear(); g_uiInst.clear(); g_winTris.clear();
 
+    // Camera mode: where SteamVR's standing space is in the game's world this frame.
+    g_stageOk = false;
+    if (UseCamera() && g_stageSpace) {
+        XrSpaceLocation loc{ XR_TYPE_SPACE_LOCATION };
+        const XrSpaceLocationFlags need = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        if (XR_SUCCEEDED(nLocateSpace(g_stageSpace, space, time, &loc)) && (loc.locationFlags & need) == need) {
+            XMStoreFloat4x4(&g_stageToWorld, XMMatrixAffineTransformation(XMVectorSet(1, 1, 1, 0), XMVectorZero(),
+                Q(loc.pose.orientation), V(loc.pose.position)));
+            g_stageOk = true;
+        }
+        static int lastOk = -1;
+        if ((int)g_stageOk != lastOk) {
+            Log(g_stageOk ? "Camera: placed in the game's world (STAGE space at %.2f %.2f %.2f).\n"
+                          : "Camera: STAGE space not located this frame (camera picture hidden).\n",
+                loc.pose.position.x, loc.pose.position.y, loc.pose.position.z);
+            lastOk = g_stageOk;
+        }
+    }
+
     // --- eye gaze ray (eye-tracking headsets)
     g_gazeValid = false;
     if (g_act.attached && g_act.eyeSpace && nLocateSpace) {
@@ -2998,7 +3045,7 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
             if (h.vSince < 0) h.vSince = now;
             float prog = float((now - h.vSince) / 0.8);
             if (!h.vLatched) {
-                int next = (g_keyMode + 1) % 4;
+                int next = NextKeyMode(g_keyMode);
                 float c[3] = { kKeyCol[next][0], kKeyCol[next][1], kKeyCol[next][2] };
                 if (!next) c[0] = c[1] = c[2] = 0.85f;   // back to alpha: light grey
                 XMFLOAT3 vp;
@@ -3622,6 +3669,7 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
         };
         float col[4] = { 0, 0, 0, 0 };
         if (UseKeyColour()) { col[0] = kKeyCol[g_keyMode][0]; col[1] = kKeyCol[g_keyMode][1]; col[2] = kKeyCol[g_keyMode][2]; col[3] = 1; }
+        else if (UseCamera()) { col[0] = col[1] = col[2] = col[3] = 1; }   // (painted with the camera's picture)
         else if (g_visualize) { col[1] = 1; col[2] = 1; col[3] = 0.5f; }
         for (auto& h : g_hand) {
             if (!h.active || h.isCtl) continue;   // controllers have no joints
@@ -3935,12 +3983,37 @@ static void DrawMaskD3D(const std::vector<DrawView>& dviews) {
         if (!wrapped.empty()) g_on12->AcquireWrappedResources(wrapped.data(), (UINT)wrapped.size());
     }
 
-    const bool keyed = UseKeyColour(), shown = CutoutsShown();
+    // keyed: a solid key colour. camera: the camera picture, blended over the game by each window's
+    // see-through amount (alpha). Both leave the game's alpha alone (no alpha pass).
+    const bool keyed = UseKeyColour(), camera = UseCamera(), opaque = keyed || camera, shown = CutoutsShown();
     g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_ctx->RSSetState(g_rs);
     g_ctx->OMSetDepthStencilState(g_dss, 0);
     g_ctx->VSSetConstantBuffers(0, 1, &g_cb);
     g_ctx->PSSetConstantBuffers(0, 1, &g_cb);
+    // Camera mode: the newest camera picture into our texture.
+    if (camera && CamTakeLatest(g_camCur) && g_camCur.w && g_camCur.h) {
+        if (g_camCur.w != g_camTexW || g_camCur.h != g_camTexH) {
+            SafeRelease(g_camSrv); SafeRelease(g_camTex);
+            D3D11_TEXTURE2D_DESC td{};
+            td.Width = g_camCur.w; td.Height = g_camCur.h; td.MipLevels = 1; td.ArraySize = 1;
+            td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            if (SUCCEEDED(g_dev->CreateTexture2D(&td, nullptr, &g_camTex))) g_dev->CreateShaderResourceView(g_camTex, nullptr, &g_camSrv);
+            g_camTexW = g_camCur.w; g_camTexH = g_camCur.h;
+            Log(g_camSrv ? "Camera picture texture %ux%u.\n" : "Camera picture texture %ux%u failed.\n", g_camTexW, g_camTexH);
+        }
+        if (g_camTex) { g_ctx->UpdateSubresource(g_camTex, 0, nullptr, g_camCur.px.data(), g_camCur.w * 4, 0); g_camTexSeq = g_camCur.seq; }
+    }
+    const bool camReady = camera && g_camSrv && g_camTexSeq;
+    g_ctx->PSSetSamplers(0, 1, &g_sampLinear);
+    if (g_cbCam) { g_ctx->VSSetConstantBuffers(3, 1, &g_cbCam); g_ctx->PSSetConstantBuffers(3, 1, &g_cbCam); }
+    {
+        ID3D11ShaderResourceView* cs = camReady ? g_camSrv : nullptr;
+        g_ctx->PSSetShaderResources(2, 1, &cs);
+    }
+    // Cutouts' blend: camera = blended by alpha, key colour (or visualizing) = solid, alpha = alpha only.
+    ID3D11BlendState* cutBlend = camera ? g_bsBlend : (keyed || g_visualize ? g_bsAll : g_bsAlphaOnly);
 
     for (const DrawView& pv : dviews) {
         auto it = g_swapchains.find(pv.swapchain);
@@ -3968,9 +4041,18 @@ static void DrawMaskD3D(const std::vector<DrawView>& dviews) {
         CB cb{};
         XMStoreFloat4(&cb.camR, cam.r[0]);
         XMStoreFloat4(&cb.camU, cam.r[1]);
+        if (g_cbCam) {
+            DXGI_FORMAT f = (DXGI_FORMAT)it->second.format;
+            bool linearRT = f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+                            f == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB || f == DXGI_FORMAT_R16G16B16A16_FLOAT ||
+                            f == DXGI_FORMAT_R11G11B10_FLOAT || f == DXGI_FORMAT_R32G32B32A32_FLOAT;
+            CBCam k = camera ? MakeCBCam(cam, linearRT) : CBCam{};
+            if (camera && !camReady) k.camInfo.w = 0;
+            g_ctx->UpdateSubresource(g_cbCam, 0, nullptr, &k, 0, 0);
+        }
         // 1. Alpha mode: force alpha = 1 everywhere (games often leave junk in alpha).
-        //    Key colour mode keeps the game's alpha (the layer isn't alpha blended then).
-        if (!keyed) {
+        //    Key colour and camera modes keep the game's alpha (the layer isn't alpha blended then).
+        if (!opaque) {
             XMStoreFloat4x4(&cb.mvp, XMMatrixIdentity());
             cb.col = { 0, 0, 0, 1 };
             g_ctx->UpdateSubresource(g_cb, 0, nullptr, &cb, 0, 0);
@@ -3988,7 +4070,7 @@ static void DrawMaskD3D(const std::vector<DrawView>& dviews) {
             cb.col = keyed ? XMFLOAT4{ kKeyCol[g_keyMode][0], kKeyCol[g_keyMode][1], kKeyCol[g_keyMode][2], 1 }
                    : g_visualize ? XMFLOAT4{ 0, 1, 0, 0.5f } : XMFLOAT4{ 0, 0, 0, 0 };
             g_ctx->UpdateSubresource(g_cb, 0, nullptr, &cb, 0, 0);
-            g_ctx->OMSetBlendState(keyed || g_visualize ? g_bsAll : g_bsAlphaOnly, nullptr, 0xffffffff);
+            g_ctx->OMSetBlendState(cutBlend, nullptr, 0xffffffff);
             UINT stride = sizeof(XMFLOAT3), off = 0;
             g_ctx->IASetInputLayout(g_ilMesh);
             g_ctx->IASetVertexBuffers(0, 1, &g_winVB, &stride, &off);
@@ -4057,7 +4139,7 @@ static void DrawMaskD3D(const std::vector<DrawView>& dviews) {
             g_ctx->VSSetShader(g_vsSphere, nullptr, 0);
             g_ctx->PSSetShader(g_psColor, nullptr, 0);
             if (maskCount && shown) {
-                g_ctx->OMSetBlendState(keyed || g_visualize ? g_bsAll : g_bsAlphaOnly, nullptr, 0xffffffff);
+                g_ctx->OMSetBlendState(cutBlend, nullptr, 0xffffffff);
                 // Hands behind game objects: test each pixel against the game's depth.
                 ID3D11ShaderResourceView* hdepth = (g_handOcclude && g_vsSphereD && g_psHandD) ? ViewDepthSRV() : nullptr;
                 const ViewDepth& vd = pv.depth;
@@ -4500,7 +4582,20 @@ static XrResult XRAPI_CALL Hook_xrCreateSession(XrInstance instance, const XrSes
     g_alphaSupported = false;
     for (auto m : modes) if (m == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND) g_alphaSupported = true;
     Log("Runtime offers ALPHA_BLEND: %s\n", g_alphaSupported ? "yes" : "no");
-    if (UseKeyColour())
+    // Camera mode (SteamVR with a headset camera): the default, unless another mode was picked while
+    // a camera was there.
+    if (CamDetect(g_runtimeName.find("SteamVR") != std::string::npos)) {
+        if (!g_keyChosenWithCam && !UseCamera()) {
+            g_keyMode = KEY_CAMERA;
+            Log("Cutouts: camera (automatic: SteamVR has the headset's camera). Change it with " KEY_COLOUR_HOW ".\n");
+        }
+    } else if (UseCamera()) {
+        g_keyMode = 0;
+        Log("Cutouts were set to camera, but there's no headset camera now: using alpha.\n");
+    }
+    if (UseCamera())
+        Log("Cutouts painted with the headset camera's picture (camera mode): the game's frames stay solid, no alpha needed.\n");
+    else if (UseKeyColour())
         Log("Cutouts painted %ls (key colour for %s): set your streamer to key out %ls. Change it with " KEY_COLOUR_HOW ".\n",
             kKeyName[g_keyMode], g_runtimeName.c_str(), kKeyName[g_keyMode]);
     else if (!g_alphaSupported && g_forceAlpha)
@@ -4532,6 +4627,19 @@ static XrResult XRAPI_CALL Hook_xrCreateSession(XrInstance instance, const XrSes
     }
 #endif
     g_session = *session;
+
+    // Camera mode: SteamVR's standing space (its STAGE space), to place the camera in the game's world.
+    g_stageSpace = XR_NULL_HANDLE;
+    g_stageOk = false;
+    if (g_camAvailable && !g_camFake && nCreateReferenceSpace) {
+        XrReferenceSpaceCreateInfo rci{ XR_TYPE_REFERENCE_SPACE_CREATE_INFO };
+        rci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+        rci.poseInReferenceSpace.orientation.w = 1;
+        if (XR_FAILED(nCreateReferenceSpace(*session, &rci, &g_stageSpace))) {
+            g_stageSpace = XR_NULL_HANDLE;
+            Log("Camera: no STAGE space, so the camera picture can't be placed: camera mode shows the game.\n");
+        }
+    }
 
     ReleaseHands();
     if (g_handExtEnabled && nCreateHandTrackerEXT) {
@@ -4601,6 +4709,10 @@ static XrResult XRAPI_CALL Hook_xrDestroySession(XrSession session) {
     {
         std::lock_guard<std::mutex> lk(g_mutex);
         if (session == g_session) {
+            CamSetWanted(false);
+            g_camCur = CamPicture();
+            if (g_stageSpace && nDestroySpace) nDestroySpace(g_stageSpace);
+            g_stageSpace = XR_NULL_HANDLE; g_stageOk = false;
             ReleaseActions(); ReleaseHands(); ReleaseGraphics(); g_session = XR_NULL_HANDLE;
             g_scSlots.clear(); g_locViews.clear(); g_endViews.clear(); g_endTime = g_endPeriod = 0;
             ResetDepthStatus();
@@ -4866,6 +4978,7 @@ static XrResult XRAPI_CALL Hook_xrEndFrame(XrSession session, const XrFrameEndIn
     bool drewAtRelease = g_drewThisFrame;
     g_drewThisFrame = false;
     HandleKeys();
+    CamSetWanted(UseCamera());   // the camera thread runs in camera mode only
     MaybeSelfAttach();
 
     int projIdx = -1;
@@ -4982,7 +5095,7 @@ static XrResult XRAPI_CALL Hook_xrEndFrame(XrSession session, const XrFrameEndIn
 
     // Alpha mode: the game image's alpha shows passthrough. Key colour mode (or a runtime with no way to
     // show alpha) leaves the game's layer flags and blend mode alone: the colour itself is the signal.
-    bool alphaOut = !UseKeyColour() && (g_alphaSupported || g_forceAlpha);
+    bool alphaOut = !OpaqueCutouts() && (g_alphaSupported || g_forceAlpha);
     if (!alphaOut) return nEndFrame(session, info);
     proj.layerFlags |= XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
     static std::vector<const XrCompositionLayerBaseHeader*> layers; layers.assign(info->layers, info->layers + info->layerCount);
@@ -5004,6 +5117,9 @@ static XrResult XRAPI_CALL Hook_xrDestroyInstance(XrInstance instance) {
         g_ctl = CtlActions();
         g_gameProfiles.clear();
         ReleaseHands();
+        CamSetWanted(false);
+        g_camCur = CamPicture();
+        g_stageSpace = XR_NULL_HANDLE; g_stageOk = false;   // (gone with the session)
         ReleaseGraphics();
         g_session = XR_NULL_HANDLE;
         StopHotkeys();
@@ -5071,7 +5187,7 @@ static XrResult XRAPI_CALL Layer_xrCreateApiLayerInstance(const XrInstanceCreate
     if (g_handExtEnabled) { GET(CreateHandTrackerEXT); GET(DestroyHandTrackerEXT); GET(LocateHandJointsEXT); }
     GET(StringToPath); GET(CreateActionSet); GET(CreateAction); GET(SuggestInteractionProfileBindings);
     GET(AttachSessionActionSets); GET(SyncActions); GET(GetActionStateFloat); GET(CreateActionSpace);
-    GET(LocateSpace); GET(DestroySpace); GET(DestroyActionSet); GET(PathToString); GET(GetActionStateBoolean); GET(GetActionStateVector2f); GET(GetCurrentInteractionProfile);
+    GET(LocateSpace); GET(CreateReferenceSpace); GET(DestroySpace); GET(DestroyActionSet); GET(PathToString); GET(GetActionStateBoolean); GET(GetActionStateVector2f); GET(GetCurrentInteractionProfile);
 #undef GET
     LoadSettings();
     {

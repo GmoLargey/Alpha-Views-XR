@@ -13,6 +13,8 @@ name=XR_APILAYER_GMO_alpha_views_xr
 mkdir -p "$dir" "$manifests"
 cp "$here/lib$name.so" "$dir/"
 chmod 755 "$dir/lib$name.so"
+# OpenVR library: camera mode (headset cameras through SteamVR) loads it from beside the layer.
+if [ -f "$here/libopenvr_api.so" ]; then cp "$here/libopenvr_api.so" "$dir/"; chmod 755 "$dir/libopenvr_api.so"; fi
 # The manifest, pointing at the installed library (full path).
 sed "s|\"library_path\": *\"[^\"]*\"|\"library_path\": \"$dir/lib$name.so\"|" "$here/$name.json" > "$manifests/$name.json"
 chmod 644 "$manifests/$name.json"

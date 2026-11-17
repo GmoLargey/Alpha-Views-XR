@@ -5,7 +5,9 @@ open-source software. These parts keep the licences below; Alpha Views XR's
 own code is under the GNU GPL version 3 (LICENSE.txt), and both licences below
 are compatible with it. The Windows layer itself
 (XR_APILAYER_GMO_alpha_views_xr.dll) only uses the OpenXR and Vulkan headers
-and the Windows SDK (Direct3D, DirectXMath), which need no notice here.
+and the Windows SDK (Direct3D, DirectXMath), which need no notice here, and
+the OpenVR header; the OpenVR library beside it (openvr_api.dll, camera mode)
+is covered in section 4.
 
 The Linux layer (libXR_APILAYER_GMO_alpha_views_xr.so) builds in DirectXMath
 and stb_truetype (section 3), and the GCC C++ runtime library (GPL with the
@@ -337,3 +339,40 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+=============================================================================
+4. OpenVR SDK (openvr_api.dll / libopenvr_api.so, beside the layer; openvr.h)
+   Camera mode (SteamVR headset cameras) loads it at run time.
+   https://github.com/ValveSoftware/openvr  (version 2.15.6)
+   Licensed under the BSD 3-Clause licence. Used unmodified.
+=============================================================================
+
+Copyright (c) 2015, Valve Corporation
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation and/or
+other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors
+may be used to endorse or promote products derived from this software without
+specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+=============================================================================

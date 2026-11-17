@@ -61,7 +61,7 @@ keyboard shortcuts on Linux (a layer can't watch the keyboard there):
   Save and finish      thumbs up, or grips + triggers again
   Delete window        thumbs down, or hold B or Y
   Cutout colour        V sign, or thumbstick press (editing): alpha / green /
-                       blue / pink
+                       blue / pink / camera (SteamVR headset cameras)
   Hands on / off       prayer (palms together)
   Box depth            green box handle, or thumbstick up / down
   Box faces            the box faces button beside the keep box button: whole

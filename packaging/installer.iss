@@ -39,9 +39,11 @@ WizardSizePercent=150
 Source: "gestures\*.bmp"; Flags: dontcopy
 Source: "{#Stage}\XR_APILAYER_GMO_alpha_views_xr.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Stage}\XR_APILAYER_GMO_alpha_views_xr.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Stage}\openvr_api.dll"; DestDir: "{app}"; Flags: ignoreversion
 ; 32-bit layer for 32-bit games (registered separately, below).
 Source: "{#Stage}\x86\XR_APILAYER_GMO_alpha_views_xr.dll"; DestDir: "{app}\x86"; Flags: ignoreversion
 Source: "{#Stage}\x86\XR_APILAYER_GMO_alpha_views_xr.json"; DestDir: "{app}\x86"; Flags: ignoreversion
+Source: "{#Stage}\x86\openvr_api.dll"; DestDir: "{app}\x86"; Flags: ignoreversion
 Source: "{#Stage}\AlphaViewsXRTest.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Stage}\README.txt"; DestDir: "{app}"; Flags: ignoreversion isreadme
 Source: "LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion

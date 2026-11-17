@@ -1,4 +1,4 @@
-ALPHA VIEWS XR  v1.5.1  by GmoLargey
+ALPHA VIEWS XR  v1.6.0  by GmoLargey
 https://github.com/GmoLargey/Alpha-Views-XR
 If you want to support me: https://ko-fi.com/virtuallyreal
 Free, open-source software (GNU GPL version 3).
@@ -6,10 +6,14 @@ See your real hands, steering wheel and flight controls inside PC VR games with
 added depth support, using your headset's passthrough camera.
 
 NEW IN THIS VERSION
-- See-through slider (half-filled ring, left of the selected window): choose
-  how much of your room shows through each window, from 100% (only the room,
-  as before) down to 0% (only the game). Saved per window. Works with alpha
-  passthrough; key colours can't be partly see-through, so it's hidden then.
+- Camera mode (SteamVR): on headsets whose cameras SteamVR can use (Valve
+  Index, Vive Pro, Reverb G2 with the Oasis driver, ...), cutouts show the
+  headset camera's picture. No alpha channel or colour key needed. Chosen
+  automatically when SteamVR has a headset camera; the V sign / Ctrl+Alt+C
+  still cycles alpha, green, blue, pink and camera.
+- From 1.5.1: the see-through slider (half-filled ring, left of the selected
+  window): how much of your room shows through each window. Works with alpha
+  passthrough and camera mode.
 - From 1.5.0: Vulkan games, a Linux version, and box faces (choose which faces
   of a box show your room, like real walls).
 - Earlier: lock and snap buttons, deep boxes, circle windows, free shapes, keep

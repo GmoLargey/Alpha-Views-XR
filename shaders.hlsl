@@ -3,24 +3,52 @@
 
 // Compiled at build time by fxc (see CMakeLists.txt) into headers included by layer.cpp.
 cbuffer C : register(b0) { float4x4 mvp; float4 col; float4 camR; float4 camU; };   // camR / camU: this eye's right / up
-struct VO { float4 pos : SV_POSITION; float4 col : COLOR; };
+struct VO { float4 pos : SV_POSITION; float4 col : COLOR; float3 vp : TEXCOORD5; };
+
+// Camera mode (SteamVR headset cameras, camera_vr.h): cutouts are painted with the camera picture
+// instead of being made transparent. vp = the point in this eye's view space (metres) whose camera
+// pixel is shown: the window's plane, the hand's surface.
+cbuffer K : register(b3) {
+    float4x4 worldToView;   // the game's world -> this eye's view space
+    float4x4 viewToCamClip; // this eye's view space -> camera clip
+    float4 camRect;         // the camera's part of the picture: u0, v0, du, dv
+    float4 camInfo;         // x = 1 camera mode, y = 1 linear target (decode sRGB), z = 1 alpha marks no data, w = 1 picture usable
+};
+Texture2D gCam : register(t2);
+SamplerState gSamp : register(s0);   // linear, clamped (also the guide panel's)
+// The camera's colour at vp, with alpha a; alpha 0 (the game stays) where the camera has nothing.
+float4 CamOut(float3 vp, float a) {
+    if (camInfo.w < 0.5) return float4(0, 0, 0, 0);
+    float4 c = mul(float4(vp, 1), viewToCamClip);
+    if (c.w <= 1e-4) return float4(0, 0, 0, 0);
+    float2 uv = float2(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);
+    if (uv.x < 0 || uv.x > 1 || uv.y < 0 || uv.y > 1) return float4(0, 0, 0, 0);
+    float4 s = gCam.SampleLevel(gSamp, camRect.xy + uv * camRect.zw, 0);
+    if (camInfo.z > 0.5 && s.a < 0.5) return float4(0, 0, 0, 0);
+    float3 rgb = s.rgb;
+    if (camInfo.y > 0.5) rgb = rgb <= 0.04045 ? rgb / 12.92 : pow((rgb + 0.055) / 1.055, 2.4);
+    return float4(rgb, a);
+}
+float3 ViewPos(float3 world) { return mul(float4(world, 1), worldToView).xyz; }
+struct MVO { float4 pos : SV_POSITION; float3 vp : TEXCOORD5; };
 
 // Fullscreen triangle.
-float4 vsFull(uint id : SV_VertexID) : SV_POSITION {
+MVO vsFull(uint id : SV_VertexID) {
     float2 uv = float2((id << 1) & 2, id & 2);
-    return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
+    MVO o; o.pos = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.vp = float3(0, 0, 0); return o;
 }
 
 // Window cutout triangles (already in world space).
-float4 vsMesh(float3 p : POSITION) : SV_POSITION { return mul(float4(p, 1), mvp); }
+MVO vsMesh(float3 p : POSITION) { MVO o; o.pos = mul(float4(p, 1), mvp); o.vp = ViewPos(p); return o; }
 
 // Instanced spheres: inst = centre + radius, c = colour.
 VO vsSphere(float3 p : POSITION, float4 inst : TEXCOORD0, float4 c : TEXCOORD1) {
-    VO o; o.pos = mul(float4(inst.xyz + p * inst.w, 1), mvp); o.col = c; return o;
+    float3 w = inst.xyz + p * inst.w;
+    VO o; o.pos = mul(float4(w, 1), mvp); o.col = c; o.vp = ViewPos(w); return o;
 }
 
-float4 psConst(float4 p : SV_POSITION) : SV_TARGET { return col; }
-float4 psColor(VO i) : SV_TARGET { return i.col; }
+float4 psConst(MVO i) : SV_TARGET { return camInfo.x > 0.5 ? CamOut(i.vp, 1) : col; }
+float4 psColor(VO i) : SV_TARGET { return camInfo.x > 0.5 ? CamOut(i.vp, 1) : i.col; }
 
 // Windows with depth (boxes, keep boxes): every window's triangles are drawn with psBox, and
 // each pixel looks at ALL windows at once, so overlapping windows combine instead of one
@@ -193,7 +221,7 @@ float4 psBox(float4 p : SV_POSITION) : SV_TARGET {
     // No game depth: every window shape shows passthrough. (info.y = 1: some box has a face mode;
     // then work each pixel out as if the game drew nothing there, 10 km away.)
     bool noDepth = info.x < 0.5;
-    if (noDepth && info.y < 0.5 && info.z < 0.5) return boxCol;
+    if (noDepth && info.y < 0.5 && info.z < 0.5 && camInfo.x < 0.5) return boxCol;
     float2 uv = (p.xy - rectC.xy) / rectC.zw;
     float dist = 1e4;
     if (!noDepth) {
@@ -210,6 +238,7 @@ float4 psBox(float4 p : SV_POSITION) : SV_TARGET {
     float bestVol = 1e30;
     bool seen = false;               // seen through a flat window or a keep box
     float seeAmt = 0;                // the most see-through of the windows it's seen through
+    float camS = -1;                 // camera mode: the eye -> surface fraction where it meets the deciding window's plane
     [loop] for (int w = 0; w < n; ++w) {
         float kind = wins[w].dim.w;
         float3 l = mul(float4(v, 1), wins[w].toLocal).xyz;
@@ -217,29 +246,33 @@ float4 psBox(float4 p : SV_POSITION) : SV_TARGET {
         float ws = wins[w].opts.x;
         // (A window already counted at full strength can't be beaten: skip the tests.)
         bool want = !seen || ws > seeAmt;
+        float dzp = l.z - e.z, sp = abs(dzp) > 1e-7 ? -e.z / dzp : -1;   // where the ray meets this window's plane
         if (kind < 0.5) {            // flat window: everything seen through its outline
             float dz = l.z - e.z;
             if (want && abs(dz) > 1e-7) {
                 float s = -e.z / dz;
-                if (s > 0 && InOutline(w, (e + (l - e) * s).xy)) { seen = true; seeAmt = max(seeAmt, ws); }
+                if (s > 0 && InOutline(w, (e + (l - e) * s).xy)) { seen = true; seeAmt = max(seeAmt, ws); camS = sp; }
             }
             continue;
         }
         int mode = (int)(wins[w].shape.w + 0.5);
         if (mode > 0) {              // box face mode: only the faces it shows are passthrough
-            if (want && CrossesShownFace(w, mode, e, l)) { seen = true; seeAmt = max(seeAmt, ws); }
+            if (want && CrossesShownFace(w, mode, e, l)) { seen = true; seeAmt = max(seeAmt, ws); camS = sp; }
             continue;
         }
         if (abs(l.z) <= wins[w].dim.z && InOutline(w, l.xy)) {
-            if (wins[w].shape.z < bestVol) { bestVol = wins[w].shape.z; best = w; }
+            if (wins[w].shape.z < bestVol) { bestVol = wins[w].shape.z; best = w; camS = sp; }
         } else if ((kind > 1.5 || noDepth) && want && Through(w, e, l)) {
-            seen = true; seeAmt = max(seeAmt, ws);
+            seen = true; seeAmt = max(seeAmt, ws); camS = sp;
         }
     }
     if (best >= 0) {
         if (wins[best].dim.w > 1.5) discard;   // inside a keep box (its innermost box): the game stays
         seeAmt = max(seeAmt, wins[best].opts.x);
     } else if (!seen) discard;
+    // Camera mode: the camera picture where the ray meets the window's plane (1 m away if it doesn't),
+    // blended over the game by the see-through amount.
+    if (camInfo.x > 0.5) return CamOut(camS > 0 ? v * camS : normalize(v), seeAmt);
     // Partly see-through: alpha between the game's (1) and passthrough's (boxCol.a). A key colour has
     // alpha 1 and see 1, so it's unchanged.
     return float4(boxCol.rgb, lerp(1, boxCol.a, seeAmt));
@@ -249,9 +282,10 @@ float4 psBox(float4 p : SV_POSITION) : SV_TARGET {
 // the hand is in front of what the game drew there. Where the game's surface is closer (the
 // in-game wheel rim in front of your fingers), the game stays on top. Uses cbuffer B's
 // rectC, rectD and depthMap, and the game depth texture, like psBox.
-struct VOD { float4 pos : SV_POSITION; float4 col : COLOR; float vz : TEXCOORD0; };
+struct VOD { float4 pos : SV_POSITION; float4 col : COLOR; float vz : TEXCOORD0; float3 vp : TEXCOORD5; };
 VOD vsSphereD(float3 p : POSITION, float4 inst : TEXCOORD0, float4 c : TEXCOORD1) {
-    VOD o; o.pos = mul(float4(inst.xyz + p * inst.w, 1), mvp); o.col = c;
+    float3 w = inst.xyz + p * inst.w;
+    VOD o; o.pos = mul(float4(w, 1), mvp); o.col = c; o.vp = ViewPos(w);
     o.vz = o.pos.w;   // distance along the view direction (perspective w)
     return o;
 }
@@ -262,7 +296,7 @@ float4 psHandD(VOD i) : SV_TARGET {
     float inv = (1 - z01) * depthMap.z + z01 * depthMap.w;
     // 1.5 cm of slack, so a hand resting on a game surface doesn't flicker.
     if (inv > 1e-5 && 1 / inv < i.vz - 0.015) discard;
-    return i.col;
+    return camInfo.x > 0.5 ? CamOut(i.vp, 1) : i.col;
 }
 
 // Edit-mode handles: smooth discs with a dark rim and a symbol for what the handle does.
@@ -409,5 +443,4 @@ struct PVI { float3 p : POSITION; float2 uv : TEXCOORD0; };
 struct PVO { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
 PVO vsPanel(PVI i) { PVO o; o.pos = mul(float4(i.p, 1), mvp); o.uv = i.uv; return o; }
 Texture2D gPanel : register(t1);
-SamplerState gSamp : register(s0);
 float4 psPanel(PVO i) : SV_TARGET { return float4(gPanel.Sample(gSamp, i.uv).rgb, 1); }

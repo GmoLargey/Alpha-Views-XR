@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 # The version: package.ps1, the installer, README and the DLL all take it from here.
-project(AlphaViewsXR VERSION 1.5.1 LANGUAGES CXX)
+project(AlphaViewsXR VERSION 1.6.0 LANGUAGES CXX)
 if(WIN32)
     enable_language(RC)
 endif()
@@ -40,6 +40,24 @@ if(NOT EXISTS ${VULKAN_DIR}/include/vulkan/vulkan.h)
     fetch(https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/${VULKAN_TAG}.tar.gz ${DEPS}/vulkan-headers.tar.gz)
     file(ARCHIVE_EXTRACT INPUT ${DEPS}/vulkan-headers.tar.gz DESTINATION ${DEPS})
 endif()
+
+# OpenVR SDK (BSD-3-Clause): only the header is compiled in. Camera mode (SteamVR headset cameras) loads
+# the runtime library at run time, from beside the layer: nothing is linked.
+set(OPENVR_TAG v2.15.6)
+set(OPENVR_DIR ${DEPS}/openvr-${OPENVR_TAG})
+set(OPENVR_RAW https://raw.githubusercontent.com/ValveSoftware/openvr/${OPENVR_TAG})
+if(WIN32)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(OPENVR_BIN bin/win64/openvr_api.dll)
+    else()
+        set(OPENVR_BIN bin/win32/openvr_api.dll)
+    endif()
+else()
+    set(OPENVR_BIN bin/linux64/libopenvr_api.so)
+endif()
+foreach(f headers/openvr.h ${OPENVR_BIN} LICENSE)
+    fetch(${OPENVR_RAW}/${f} ${OPENVR_DIR}/${f})
+endforeach()
 
 set(SHADER_SRC ${CMAKE_SOURCE_DIR}/shaders.hlsl)
 set(SHADER_OUT ${CMAKE_BINARY_DIR}/shaders)
@@ -102,12 +120,12 @@ else()
 endif()
 
 set(LAYER_NAME XR_APILAYER_GMO_alpha_views_xr)
-set(LAYER_SOURCES layer.cpp render_vk.h guide_font.h ${SHADER_HEADERS})
+set(LAYER_SOURCES layer.cpp render_vk.h camera_vr.h guide_font.h ${SHADER_HEADERS})
 if(WIN32)
     list(APPEND LAYER_SOURCES version.rc guide_icons.rc)
 endif()
 add_library(${LAYER_NAME} SHARED ${LAYER_SOURCES})
-target_include_directories(${LAYER_NAME} PRIVATE ${openxr_SOURCE_DIR}/include ${VULKAN_DIR}/include ${SHADER_OUT} ${SPIRV_DIR})
+target_include_directories(${LAYER_NAME} PRIVATE ${openxr_SOURCE_DIR}/include ${VULKAN_DIR}/include ${OPENVR_DIR}/headers ${SHADER_OUT} ${SPIRV_DIR})
 target_compile_definitions(${LAYER_NAME} PRIVATE
     LAYER_VERSION="${PROJECT_VERSION}"
     VER_MAJOR=${PROJECT_VERSION_MAJOR} VER_MINOR=${PROJECT_VERSION_MINOR} VER_PATCH=${PROJECT_VERSION_PATCH})
@@ -152,7 +170,8 @@ else()
 endif()
 
 add_custom_command(TARGET ${LAYER_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${LAYER_MANIFEST} $<TARGET_FILE_DIR:${LAYER_NAME}>/${LAYER_NAME}.json)
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${LAYER_MANIFEST} $<TARGET_FILE_DIR:${LAYER_NAME}>/${LAYER_NAME}.json
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OPENVR_DIR}/${OPENVR_BIN} $<TARGET_FILE_DIR:${LAYER_NAME}>)
 
 # Test harness (not shipped): a pretend runtime + game that drives the layer and saves what it drew
 # (tests/run_harness.ps1). Needs the Vulkan loader to link against (Vulkan SDK, or libvulkan-dev).

@@ -70,6 +70,7 @@ static const VkDeviceSize kVkInstBytes = VkDeviceSize(kMaxInst) * sizeof(Inst);
 static const VkDeviceSize kVkWinBytes = VkDeviceSize(kMaxWinVerts) * sizeof(XMFLOAT3);
 static const VkDeviceSize kVkPanelBytes = 256;
 static const VkDeviceSize kVkUboBytes = 512 * 1024;
+static const int kVkBindings = 8;            // descriptor set: cbuffers C B W K, depth, guide, camera, sampler
 struct VkSlot {
     VkCommandPool pool = VK_NULL_HANDLE;
     VkCommandBuffer cmd = VK_NULL_HANDLE;
@@ -107,6 +108,12 @@ static struct VkState {
     VkBuf guideStaging;
     int guideStagingSlot = -1;                  // the submission that last read the staging buffer
     uint64_t guideStagingSerial = 0;
+    VkImg cam;                                  // camera mode: the camera picture (RGBA)
+    VkImageView camView = VK_NULL_HANDLE;
+    uint32_t camW = 0, camH = 0, camSeq = 0;
+    VkBuf camStaging;
+    int camStagingSlot = -1;                    // the submission that last read the staging buffer
+    uint64_t camStagingSerial = 0;
     VkImg dummy;                                // 1x1 stand-in for a missing depth image / guide
     VkImageView dummyView = VK_NULL_HANDLE;
     bool dummyReady = false;
@@ -201,6 +208,9 @@ static void ReleaseVk() {
     if (g_vk.guideUnorm) f.vkDestroyImageView(d, g_vk.guideUnorm, nullptr);
     if (g_vk.guideSrgb) f.vkDestroyImageView(d, g_vk.guideSrgb, nullptr);
     if (g_vk.dummyView) f.vkDestroyImageView(d, g_vk.dummyView, nullptr);
+    if (g_vk.camView) f.vkDestroyImageView(d, g_vk.camView, nullptr);
+    VkFreeImage(g_vk.cam);
+    VkFreeBuffer(g_vk.camStaging);
     VkFreeImage(g_vk.guide);
     VkFreeImage(g_vk.dummy);
     VkFreeBuffer(g_vk.guideStaging);
@@ -262,19 +272,21 @@ static bool InitVk(const XrGraphicsBindingVulkanKHR* b) {
         if (f.vkCreateShaderModule(d, &si, nullptr, &g_vk.shaders[i]) != VK_SUCCESS) { Log("Vulkan: shader %d failed\n", i); return false; }
     }
 
-    // One descriptor set for everything: cbuffers C, B, W (dynamic offsets), the game's depth, the
-    // guide picture and its sampler.
+    // One descriptor set for everything: cbuffers C, B, W, K (dynamic offsets), the game's depth, the
+    // guide picture, the camera picture and the sampler.
     {
-        VkDescriptorSetLayoutBinding lb[6] = {
+        VkDescriptorSetLayoutBinding lb[kVkBindings] = {
             { 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT },
             { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT },
             { 2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT },
+            { 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT },
             { 10, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT },
             { 11, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT },
+            { 12, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT },
             { 20, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT },
         };
         VkDescriptorSetLayoutCreateInfo li{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-        li.bindingCount = 6; li.pBindings = lb;
+        li.bindingCount = kVkBindings; li.pBindings = lb;
         if (f.vkCreateDescriptorSetLayout(d, &li, nullptr, &g_vk.dsl) != VK_SUCCESS) return false;
         VkPipelineLayoutCreateInfo pi{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         pi.setLayoutCount = 1; pi.pSetLayouts = &g_vk.dsl;
@@ -310,7 +322,7 @@ static bool InitVk(const XrGraphicsBindingVulkanKHR* b) {
         if (f.vkAllocateCommandBuffers(d, &ai, &s.cmd) != VK_SUCCESS) return false;
         VkFenceCreateInfo fi{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
         if (f.vkCreateFence(d, &fi, nullptr, &s.fence) != VK_SUCCESS) return false;
-        VkDescriptorPoolSize ps[3] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 3 * 16 }, { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2 * 16 },
+        VkDescriptorPoolSize ps[3] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 4 * 16 }, { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 3 * 16 },
                                        { VK_DESCRIPTOR_TYPE_SAMPLER, 16 } };
         VkDescriptorPoolCreateInfo dpi{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         dpi.maxSets = 16; dpi.poolSizeCount = 3; dpi.pPoolSizes = ps;
@@ -529,6 +541,49 @@ static void VkUploadGuide(VkSlot& s) {
     g_vk.guideStagingSerial = g_vk.serial + 1;   // the serial this slot is about to be submitted with
 }
 
+// Camera mode: the newest camera picture into g_vk.cam (made or remade at its size).
+static void VkUploadCamera(VkSlot& s) {
+    auto& f = g_vk.f;
+    const CamPicture& c = g_camCur;
+    if (!c.w || !c.h || c.px.size() < size_t(c.w) * c.h * 4) return;
+    if (c.w != g_vk.camW || c.h != g_vk.camH) {
+        VkWaitAll();
+        if (g_vk.camView) f.vkDestroyImageView(g_vk.device, g_vk.camView, nullptr);
+        g_vk.camView = VK_NULL_HANDLE;
+        VkFreeImage(g_vk.cam); VkFreeBuffer(g_vk.camStaging);
+        g_vk.camW = c.w; g_vk.camH = c.h; g_vk.camSeq = 0; g_vk.camStagingSlot = -1;
+        VkImageCreateInfo ic{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        ic.imageType = VK_IMAGE_TYPE_2D; ic.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ic.extent = { c.w, c.h, 1 }; ic.mipLevels = 1; ic.arrayLayers = 1;
+        ic.samples = VK_SAMPLE_COUNT_1_BIT; ic.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ic.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        bool ok = VkMakeImage(g_vk.cam, ic) && VkMakeBuffer(g_vk.camStaging, VkDeviceSize(c.w) * c.h * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+        if (ok) g_vk.camView = VkMakeView(g_vk.cam.img, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1);
+        Log(g_vk.camView ? "Camera picture image %ux%u (Vulkan).\n" : "Camera picture image %ux%u failed (Vulkan).\n", c.w, c.h);
+        if (!g_vk.camView) { VkFreeImage(g_vk.cam); VkFreeBuffer(g_vk.camStaging); return; }
+    }
+    if (!g_vk.camView) return;
+    // The staging buffer may still be read by an earlier upload.
+    if (g_vk.camStagingSlot >= 0) {
+        VkSlot& o = g_vk.slots[g_vk.camStagingSlot];
+        if (o.pending && o.serial == g_vk.camStagingSerial) { f.vkWaitForFences(g_vk.device, 1, &o.fence, VK_TRUE, UINT64_MAX); o.pending = false; }
+    }
+    memcpy(g_vk.camStaging.map, c.px.data(), size_t(c.w) * c.h * 4);
+    const VkImageAspectFlags C = VK_IMAGE_ASPECT_COLOR_BIT;
+    VkBarrier(s.cmd, g_vk.cam.img, C, 0, 1, 0, g_vk.camSeq ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkBufferImageCopy bc{};
+    bc.imageSubresource = { C, 0, 0, 1 };
+    bc.imageExtent = { c.w, c.h, 1 };
+    f.vkCmdCopyBufferToImage(s.cmd, g_vk.camStaging.buf, g_vk.cam.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bc);
+    VkBarrier(s.cmd, g_vk.cam.img, C, 0, 1, 0, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+              VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    g_vk.camSeq = c.seq ? c.seq : 1;
+    g_vk.camStagingSlot = int(&s - g_vk.slots);
+    g_vk.camStagingSerial = g_vk.serial + 1;   // the serial this slot is about to be submitted with
+}
+
 // Image view + framebuffer for one slice of one of the game's colour images.
 static VkFramebuffer VkFramebufferFor(SwapchainInfo& sc, uint32_t image, uint32_t slice, VkRenderPass rp) {
     uint64_t key = (uint64_t(image) << 32) | slice;
@@ -645,7 +700,12 @@ static void DrawMaskVk(const std::vector<DrawView>& dviews) {
         }
     }
 
-    const bool keyed = UseKeyColour(), shown = CutoutsShown();
+    // keyed: a solid key colour. camera: the camera picture, blended over the game by each window's
+    // see-through amount. Both leave the game's alpha alone (no alpha pass).
+    const bool keyed = UseKeyColour(), camera = UseCamera(), opaque = keyed || camera, shown = CutoutsShown();
+    if (camera && CamTakeLatest(g_camCur)) VkUploadCamera(s);
+    const bool camReady = camera && g_vk.camView && g_vk.camSeq;
+    const VkBlend cutBlend = camera ? VB_BLEND : (keyed || g_visualize ? VB_ALL : VB_ALPHA_ONLY);
     bool any = false;
     for (const DrawView& pv : dviews) {
         auto it = g_swapchains.find(pv.swapchain);
@@ -674,19 +734,21 @@ static void DrawMaskVk(const std::vector<DrawView>& dviews) {
         ai.descriptorPool = s.dpool; ai.descriptorSetCount = 1; ai.pSetLayouts = &g_vk.dsl;
         if (f.vkAllocateDescriptorSets(g_vk.device, &ai, &set) != VK_SUCCESS) set = VK_NULL_HANDLE;
         if (set) {
-            VkDescriptorBufferInfo dbi[3] = { { s.buf.buf, 0, sizeof(CB) }, { s.buf.buf, 0, sizeof(CBBox) }, { s.buf.buf, 0, sizeof(CBWin) } };
-            VkDescriptorImageInfo dii[3] = {
+            VkDescriptorBufferInfo dbi[4] = { { s.buf.buf, 0, sizeof(CB) }, { s.buf.buf, 0, sizeof(CBBox) }, { s.buf.buf, 0, sizeof(CBWin) },
+                                              { s.buf.buf, 0, sizeof(CBCam) } };
+            VkDescriptorImageInfo dii[4] = {
                 { VK_NULL_HANDLE, depth.view ? depth.view : g_vk.dummyView, depth.view ? kRead : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
                 { VK_NULL_HANDLE, drawGuide ? (VkLinearTarget(fmt) ? g_vk.guideSrgb : g_vk.guideUnorm) : g_vk.dummyView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+                { VK_NULL_HANDLE, camReady ? g_vk.camView : g_vk.dummyView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
                 { g_vk.sampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED } };
-            VkWriteDescriptorSet w[6] = {};
-            const uint32_t bind[6] = { 0, 1, 2, 10, 11, 20 };
-            for (int k = 0; k < 6; ++k) {
+            VkWriteDescriptorSet w[kVkBindings] = {};
+            const uint32_t bind[kVkBindings] = { 0, 1, 2, 3, 10, 11, 12, 20 };
+            for (int k = 0; k < kVkBindings; ++k) {
                 w[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[k].dstSet = set; w[k].dstBinding = bind[k]; w[k].descriptorCount = 1;
-                if (k < 3) { w[k].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; w[k].pBufferInfo = &dbi[k]; }
-                else { w[k].descriptorType = k == 5 ? VK_DESCRIPTOR_TYPE_SAMPLER : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; w[k].pImageInfo = &dii[k - 3]; }
+                if (k < 4) { w[k].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; w[k].pBufferInfo = &dbi[k]; }
+                else { w[k].descriptorType = k == kVkBindings - 1 ? VK_DESCRIPTOR_TYPE_SAMPLER : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; w[k].pImageInfo = &dii[k - 4]; }
             }
-            f.vkUpdateDescriptorSets(g_vk.device, 6, w, 0, nullptr);
+            f.vkUpdateDescriptorSets(g_vk.device, kVkBindings, w, 0, nullptr);
         }
 
         const XrRect2Di& r = pv.rect;
@@ -714,19 +776,22 @@ static void DrawMaskVk(const std::vector<DrawView>& dviews) {
             CB cb{};
             XMStoreFloat4(&cb.camR, cam.r[0]);
             XMStoreFloat4(&cb.camU, cam.r[1]);
+            CBCam kc = camera ? MakeCBCam(cam, VkLinearTarget(fmt)) : CBCam{};
+            if (camera && !camReady) kc.camInfo.w = 0;
+            const uint32_t offK = pushUbo(&kc, sizeof kc);   // cbuffer K: this view's camera constants
             uint32_t offB = 0, offW = 0;   // cbuffers B and W for the current draw (0: unused)
             VkPipeline bound = VK_NULL_HANDLE;
             auto use = [&](VkProg prog, VkBlend blend, uint32_t offC) -> bool {
                 VkPipeline pipe = VkPipe(fmt, samples, prog, blend);
-                if (!pipe || offC == UINT32_MAX || offB == UINT32_MAX || offW == UINT32_MAX) return false;
+                if (!pipe || offC == UINT32_MAX || offB == UINT32_MAX || offW == UINT32_MAX || offK == UINT32_MAX) return false;
                 if (pipe != bound) { f.vkCmdBindPipeline(s.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe); bound = pipe; }
-                uint32_t dyn[3] = { offC, offB, offW };
-                f.vkCmdBindDescriptorSets(s.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_vk.layout, 0, 1, &set, 3, dyn);
+                uint32_t dyn[4] = { offC, offB, offW, offK };
+                f.vkCmdBindDescriptorSets(s.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_vk.layout, 0, 1, &set, 4, dyn);
                 return true;
             };
 
             // 1. Alpha mode: force alpha = 1 everywhere (games often leave junk in alpha).
-            if (!keyed) {
+            if (!opaque) {
                 XMStoreFloat4x4(&cb.mvp, XMMatrixIdentity());
                 cb.col = { 0, 0, 0, 1 };
                 if (use(VP_FULL, VB_ALPHA_ONLY, pushUbo(&cb, sizeof cb))) f.vkCmdDraw(s.cmd, 3, 1, 0, 0);
@@ -737,7 +802,7 @@ static void DrawMaskVk(const std::vector<DrawView>& dviews) {
             if (winVerts && shown) {
                 cb.col = keyed ? XMFLOAT4{ kKeyCol[g_keyMode][0], kKeyCol[g_keyMode][1], kKeyCol[g_keyMode][2], 1 }
                        : g_visualize ? XMFLOAT4{ 0, 1, 0, 0.5f } : XMFLOAT4{ 0, 0, 0, 0 };
-                VkBlend bl = keyed || g_visualize ? VB_ALL : VB_ALPHA_ONLY;
+                VkBlend bl = cutBlend;
                 uint32_t offC = pushUbo(&cb, sizeof cb);
                 VkDeviceSize vo = offWin;
                 if (!BoxPass()) {   // flat windows only, fully see-through: cut their whole outline
@@ -777,7 +842,7 @@ static void DrawMaskVk(const std::vector<DrawView>& dviews) {
                 VkBuffer vbs[2] = { g_vk.geo.buf, s.buf.buf };
                 VkDeviceSize vos[2] = { 0, 0 };
                 if (maskCount && shown) {
-                    VkBlend bl = keyed || g_visualize ? VB_ALL : VB_ALPHA_ONLY;
+                    VkBlend bl = cutBlend;
                     const ViewDepth& vd = pv.depth;
                     float range = vd.maxDepth - vd.minDepth;
                     bool occl = g_handOcclude && depth.view && fabsf(range) > 1e-6f;
