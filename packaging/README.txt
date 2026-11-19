@@ -1,4 +1,4 @@
-ALPHA VIEWS XR  v1.6.0
+ALPHA VIEWS XR  v1.6.1
 by GmoLargey  -  https://github.com/GmoLargey/Alpha-Views-XR
 If you want to support me: https://ko-fi.com/virtuallyreal
 Free, open-source software under the GNU GPL version 3 (see LICENCE at the end).
@@ -48,6 +48,8 @@ Check these:
         (Valve Index, Vive Pro, Reverb G2 with the Oasis driver, ...), with
         SteamVR as the OpenXR runtime, cutouts show the headset camera's
         picture. Nothing to set up: it's chosen automatically (section 6).
+        If SteamVR offers an alpha channel itself (e.g. Steam Frame), alpha
+        (a) is used instead, showing the headset's own passthrough.
 
 Try it first with the test scene (Start menu: "Alpha Views XR test scene"). It
 shows a spinning cube just below eye level, within reach: put a hand behind it
@@ -191,7 +193,8 @@ For any outline other than a rounded rectangle (a wheel rim, a button box):
           whose cameras SteamVR can use). The game's frames stay solid, so no
           alpha channel or colour key is needed. Chosen automatically when
           SteamVR has a headset camera, unless you picked something else while
-          it was there.
+          it was there, or SteamVR offers an alpha channel (e.g. Steam Frame):
+          then alpha is used, showing the headset's own passthrough.
 Change it with Ctrl+Alt+C, a V sign or a thumbstick press (edit mode): alpha,
 green, blue, pink, then camera (only when there is one). For a colour, set your
 streamer's colour-key passthrough to the same colour.
@@ -315,7 +318,7 @@ the Ctrl+Alt keys: use hands or controllers. Its own README.txt has the details.
 =============================================================================
 INSTALL, FILES, UNINSTALL
 =============================================================================
-Install: run AlphaViewsXR-Setup-1.6.0.exe (asks for admin), or for the zip,
+Install: run AlphaViewsXR-Setup-1.6.1.exe (asks for admin), or for the zip,
 extract it somewhere permanent and double-click Install.bat.
 
 Files, in %LOCALAPPDATA%\AlphaViewsXR:

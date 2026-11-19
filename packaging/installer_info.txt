@@ -1,4 +1,4 @@
-ALPHA VIEWS XR  v1.6.0  by GmoLargey
+ALPHA VIEWS XR  v1.6.1  by GmoLargey
 https://github.com/GmoLargey/Alpha-Views-XR
 If you want to support me: https://ko-fi.com/virtuallyreal
 Free, open-source software (GNU GPL version 3).

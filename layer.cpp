@@ -94,7 +94,8 @@
 //                           - / = shrink / grow hand cutouts (saved),
 //                           [ / ] selected window's box depth -/+ 1 cm (saved),
 //                           D experimental D3D12 support on/off (saved, next game launch),
-//                           K force alpha on/off, for runtimes that pass alpha on without offering ALPHA_BLEND (saved),
+//                           K force alpha on/off, for runtimes that pass alpha on without offering ALPHA_BLEND (saved;
+//                             asks for ALPHA_BLEND anyway, falling back to the game's blend mode if it's rejected),
 //                           C cutout colour: alpha / green / blue / pink (saved per runtime). A key
 //                             colour paints cutouts solid for streamers that chroma-key it to their
 //                             passthrough (e.g. Virtual Desktop); boxes still use the game's depth.
@@ -1564,7 +1565,8 @@ static void HandleD3D12Key() {
 static void HandleForceAlphaKey() {
     if (!Pressed(HK_K)) return;
     g_forceAlpha = !g_forceAlpha;
-    Log("Force alpha %s.\n", g_forceAlpha ? "ON: cutouts transparent, layer alpha flags set (game's blend mode kept)" : "OFF");
+    Log("Force alpha %s.\n", g_forceAlpha ? "ON: cutouts transparent, layer alpha flags set, ALPHA_BLEND asked for "
+        "(the game's blend mode if the runtime rejects it)" : "OFF");
     SaveSettings();
 #ifdef _WIN32
     MessageBeep(g_forceAlpha ? MB_OK : MB_ICONHAND);
@@ -4583,9 +4585,15 @@ static XrResult XRAPI_CALL Hook_xrCreateSession(XrInstance instance, const XrSes
     for (auto m : modes) if (m == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND) g_alphaSupported = true;
     Log("Runtime offers ALPHA_BLEND: %s\n", g_alphaSupported ? "yes" : "no");
     // Camera mode (SteamVR with a headset camera): the default, unless another mode was picked while
-    // a camera was there.
+    // a camera was there, or the runtime offers ALPHA_BLEND (e.g. SteamVR on a Steam Frame): then its
+    // own passthrough shows through alpha-0 cutouts, which beats painting the camera picture in.
     if (CamDetect(g_runtimeName.find("SteamVR") != std::string::npos)) {
-        if (!g_keyChosenWithCam && !UseCamera()) {
+        if (g_alphaSupported) {
+            if (!g_keyChosenWithCam && UseCamera()) g_keyMode = 0;
+            if (!g_keyChosenWithCam && g_keyMode == 0)
+                Log("Cutouts: alpha (automatic: the runtime offers ALPHA_BLEND, so its own passthrough is used rather than "
+                    "the headset camera's picture). Change it with " KEY_COLOUR_HOW ".\n");
+        } else if (!g_keyChosenWithCam && !UseCamera()) {
             g_keyMode = KEY_CAMERA;
             Log("Cutouts: camera (automatic: SteamVR has the headset's camera). Change it with " KEY_COLOUR_HOW ".\n");
         }
@@ -4599,7 +4607,8 @@ static XrResult XRAPI_CALL Hook_xrCreateSession(XrInstance instance, const XrSes
         Log("Cutouts painted %ls (key colour for %s): set your streamer to key out %ls. Change it with " KEY_COLOUR_HOW ".\n",
             kKeyName[g_keyMode], g_runtimeName.c_str(), kKeyName[g_keyMode]);
     else if (!g_alphaSupported && g_forceAlpha)
-        Log("Force alpha ON: cutouts are transparent and layer alpha flags are set; the game's own blend mode is kept (Ctrl+Alt+K turns this off).\n");
+        Log("Force alpha ON: cutouts are transparent, layer alpha flags are set and ALPHA_BLEND is asked for "
+            "(the game's own blend mode if the runtime rejects it; Ctrl+Alt+K turns this off).\n");
     else if (!g_alphaSupported)
         // Stay active (hotkeys and edit mode work) but draw no cutouts until a key colour is chosen.
         Log("%s has no alpha passthrough, so cutouts are hidden. Edit mode still works. Use " KEY_COLOUR_HOW " for a key colour "
@@ -5102,11 +5111,23 @@ static XrResult XRAPI_CALL Hook_xrEndFrame(XrSession session, const XrFrameEndIn
     layers[projIdx] = (const XrCompositionLayerBaseHeader*)&proj;
     XrFrameEndInfo fei = *info;
     fei.layers = layers.data();
-    if (g_alphaSupported) fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND;
+    // Force alpha also asks for ALPHA_BLEND, for runtimes that accept it without listing it (SteamVR on
+    // some headsets). If the runtime rejects it, the same frame goes again in the game's blend mode, and
+    // force alpha keeps to that for the rest of the session.
+    static bool forcedBlendRejected = false;
+    bool askAlpha = g_alphaSupported || (g_forceAlpha && !forcedBlendRejected);
+    if (askAlpha) fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND;
 
     static bool logged = false;
-    if (!logged) { Log("First masked frame submitted (blend %s).\n", g_alphaSupported ? "ALPHA_BLEND" : "game default"); logged = true; }
-    return nEndFrame(session, &fei);
+    if (!logged) { Log("First masked frame submitted (blend %s).\n", askAlpha ? "ALPHA_BLEND" : "game default"); logged = true; }
+    XrResult res = nEndFrame(session, &fei);
+    if (res == XR_ERROR_ENVIRONMENT_BLEND_MODE_UNSUPPORTED && askAlpha && !g_alphaSupported) {
+        forcedBlendRejected = true;
+        Log("Force alpha: the runtime rejected ALPHA_BLEND; keeping the game's blend mode (layer alpha flags still set).\n");
+        fei.environmentBlendMode = info->environmentBlendMode;
+        res = nEndFrame(session, &fei);
+    }
+    return res;
 }
 
 static XrResult XRAPI_CALL Hook_xrDestroyInstance(XrInstance instance) {
