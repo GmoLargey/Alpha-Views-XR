@@ -12,6 +12,7 @@ the keyboard.
 
 [Download](https://github.com/GmoLargey/Alpha-Views-XR/releases) · [User guide](packaging/README.txt) · [Building from source](#building-from-source) · [Support me on Ko-fi](https://ko-fi.com/virtuallyreal)
 
+shown here with Steam Link VR beta (now supports colour key and alpha channel) https://www.youtube.com/watch?v=IPanlKc00gk
 ---
 
 ## Features
@@ -131,7 +132,8 @@ included in the source package).
 
 `tests/` has a pretend OpenXR runtime and game (`-DAVXR_HARNESS=ON`, needs the Vulkan SDK or
 `libvulkan-dev`) that drives the layer with D3D11 or Vulkan and saves what it drew:
-`testsun_harness.ps1` (Windows: compares D3D11 with Vulkan), `tests/run_harness.sh` (Linux;
+`tests
+un_harness.ps1` (Windows: compares D3D11 with Vulkan), `tests/run_harness.sh` (Linux;
 Mesa's lavapipe works without a GPU).
 
 ### Project layout
