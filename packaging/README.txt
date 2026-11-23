@@ -1,4 +1,4 @@
-ALPHA VIEWS XR  v1.6.1
+ALPHA VIEWS XR  v1.6.3
 by GmoLargey  -  https://github.com/GmoLargey/Alpha-Views-XR
 If you want to support me: https://ko-fi.com/virtuallyreal
 Free, open-source software under the GNU GPL version 3 (see LICENCE at the end).
@@ -88,7 +88,8 @@ Select a window by grabbing it. Its handles then appear, each with a symbol:
                                   (section 7)
   Half-filled ring (left of the   see-through: slide it up for more room, down for
   window, on a dotted track)      more game (100% = only the room, the default).
-                                  Alpha and camera modes: not shown with a key colour
+                                  With a key colour, partial see-through needs a
+                                  streamer with a soft key (section 6)
   Padlock button (above, left)    lock the window's angle: moving it then never
                                   tilts or turns it. Gold while locked
   Purple button (above)           rectangle <-> free shape (section 5)
@@ -204,6 +205,21 @@ streamer's colour-key passthrough to the same colour.
     shows the camera ("showing", "waiting for pictures"...). It uses one camera
     for both eyes. camera.cfg (optional, in the settings folder) can choose
     another: frame=1|2, pose=0|1, camera=N (as in Alpha Views VR).
+  - Steam Link (SteamVR beta + Steam Link beta, Quest or Steam Frame): in
+    SteamVR Settings > Steam Link > Room View set Key Mode to Key Content and
+    Key Color to the same colour. Key Content lets Alpha Views XR's colour
+    through; Protect Content shifts colours away from the key, so it may not.
+  - See-through sliders with a key colour (windows, and hands: section 8):
+    the key colour is mixed over the
+    game, so less than 100% only works on a streamer whose key fades colours
+    near the key colour (Steam Link: lower Key Threshold for a softer key).
+    A hard key shows either all room or all game.
+  - Steam Link on Quest: alpha mode goes through the same key too (SteamVR
+    turns the transparency into its key colour), so partly see-through
+    windows and hands need a soft Key Threshold there as well (0.30 works;
+    0.50 makes everything all room or all game). Even then the key only
+    reaches so far: at 0.30, below about 50% you see a green tint instead
+    of the room.
   - Pick a colour the game doesn't use much, or those parts key out too.
   - Boxes still use the game's depth, so they key out the same way (no depth:
     the box is a plain cube of colour).
@@ -266,6 +282,15 @@ Save a preset once everything is right. If a window gets knocked out of place,
 tap the preset to get it back. If your seat has moved since, load the preset,
 then nudge everything with "move all" and save the preset again.
 
+HANDS SEE-THROUGH: the "Hands: 100% room" slider beside the presets sets how
+much of the room the hand cutouts show: 100% = all room (the default), less =
+your hands blend with the game, 0% = no hand cutouts. Point at it, then pinch
+or pull the trigger and slide. A tap sets it where you point. Kept for all
+games. Works in alpha and key colour modes (camera mode: always 100%). A hand
+over a partly see-through window shows at least that window's room (alpha), or
+a bit more (key colour). Key colour: needs a soft key, like the window slider
+(section 6).
+
 
 =============================================================================
 9. EXPERIMENTAL: DIRECT3D 12 GAMES
@@ -318,7 +343,7 @@ the Ctrl+Alt keys: use hands or controllers. Its own README.txt has the details.
 =============================================================================
 INSTALL, FILES, UNINSTALL
 =============================================================================
-Install: run AlphaViewsXR-Setup-1.6.1.exe (asks for admin), or for the zip,
+Install: run AlphaViewsXR-Setup-1.6.3.exe (asks for admin), or for the zip,
 extract it somewhere permanent and double-click Install.bat.
 
 Files, in %LOCALAPPDATA%\AlphaViewsXR:

@@ -56,7 +56,7 @@ struct VkFns {
 
 // Programs (vertex + pixel shader, vertex input) and blend modes, as in DrawMaskD3D.
 enum VkProg { VP_FULL, VP_MESH_CONST, VP_MESH_BOX, VP_PANEL, VP_SPHERE, VP_SPHERE_D, VP_ICON, VP_COUNT };
-enum VkBlend { VB_ALPHA_ONLY, VB_ALL, VB_BLEND };
+enum VkBlend { VB_ALPHA_ONLY, VB_ALL, VB_BLEND, VB_ALPHA_MAX, VB_DEST_ALPHA, VB_ALPHA_MIN };
 enum VkShader { VS_FULL, VS_MESH, VS_SPHERE, PS_CONST, PS_COLOR, PS_BOX, VS_PANEL, PS_PANEL, VS_SPHERE_D, PS_HAND_D,
                 VS_ICON, PS_ICON, SH_COUNT };
 
@@ -454,12 +454,27 @@ static VkPipeline VkPipe(VkFormat fmt, uint32_t samples, VkProg prog, VkBlend bl
     VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
     ms.rasterizationSamples = (VkSampleCountFlagBits)samples;
     VkPipelineColorBlendAttachmentState ba{};
-    if (blend == VB_ALPHA_ONLY) ba.colorWriteMask = VK_COLOR_COMPONENT_A_BIT;
+    if (blend == VB_ALPHA_ONLY || blend == VB_ALPHA_MAX || blend == VB_ALPHA_MIN) ba.colorWriteMask = VK_COLOR_COMPONENT_A_BIT;
     else ba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     if (blend == VB_BLEND) {   // edit handles: soft edges; colour blends, alpha builds up to 1 (as g_bsBlend)
         ba.blendEnable = VK_TRUE;
         ba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA; ba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; ba.colorBlendOp = VK_BLEND_OP_ADD;
         ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE; ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; ba.alphaBlendOp = VK_BLEND_OP_ADD;
+    }
+    if (blend == VB_ALPHA_MAX) {   // key colour, partly see-through: alpha = max(alpha, see) (as g_bsAlphaMax)
+        ba.blendEnable = VK_TRUE;
+        ba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE; ba.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO; ba.colorBlendOp = VK_BLEND_OP_ADD;
+        ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE; ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE; ba.alphaBlendOp = VK_BLEND_OP_MAX;
+    }
+    if (blend == VB_ALPHA_MIN) {   // alpha mode, hands partly see-through: alpha = min(alpha, 1 - see) (as g_bsAlphaMin)
+        ba.blendEnable = VK_TRUE;
+        ba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE; ba.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO; ba.colorBlendOp = VK_BLEND_OP_ADD;
+        ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE; ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE; ba.alphaBlendOp = VK_BLEND_OP_MIN;
+    }
+    if (blend == VB_DEST_ALPHA) {  // then the key colour mixed in by that alpha, alpha = 1 (as g_bsDestAlpha)
+        ba.blendEnable = VK_TRUE;
+        ba.srcColorBlendFactor = VK_BLEND_FACTOR_DST_ALPHA; ba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA; ba.colorBlendOp = VK_BLEND_OP_ADD;
+        ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE; ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO; ba.alphaBlendOp = VK_BLEND_OP_ADD;
     }
     VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
     cb.attachmentCount = 1; cb.pAttachments = &ba;
@@ -705,7 +720,12 @@ static void DrawMaskVk(const std::vector<DrawView>& dviews) {
     const bool keyed = UseKeyColour(), camera = UseCamera(), opaque = keyed || camera, shown = CutoutsShown();
     if (camera && CamTakeLatest(g_camCur)) VkUploadCamera(s);
     const bool camReady = camera && g_vk.camView && g_vk.camSeq;
+    const bool keyPartial = keyed && AnyPartialWindow();   // gathered in alpha, then mixed (see g_bsAlphaMax)
     const VkBlend cutBlend = camera ? VB_BLEND : (keyed || g_visualize ? VB_ALL : VB_ALPHA_ONLY);
+    const VkBlend winBlend = keyPartial ? VB_ALPHA_MAX : cutBlend;   // windows (hands use cutBlend)
+    // Hands partly see-through (as DrawMaskD3D): key colour = gathered in alpha then mixed, alpha = MIN.
+    const bool handPartial = HandSeeOf() < 1 && !g_visualize && (keyed || !opaque);
+    const VkBlend handBlend = !handPartial ? cutBlend : keyed ? VB_ALPHA_MAX : VB_ALPHA_MIN;
     bool any = false;
     for (const DrawView& pv : dviews) {
         auto it = g_swapchains.find(pv.swapchain);
@@ -791,9 +811,10 @@ static void DrawMaskVk(const std::vector<DrawView>& dviews) {
             };
 
             // 1. Alpha mode: force alpha = 1 everywhere (games often leave junk in alpha).
-            if (!opaque) {
+            //    (Key colour with partly see-through windows: alpha = 0, to gather the see-through amounts in.)
+            if (!opaque || keyPartial) {
                 XMStoreFloat4x4(&cb.mvp, XMMatrixIdentity());
-                cb.col = { 0, 0, 0, 1 };
+                cb.col = { 0, 0, 0, keyPartial ? 0.0f : 1.0f };
                 if (use(VP_FULL, VB_ALPHA_ONLY, pushUbo(&cb, sizeof cb))) f.vkCmdDraw(s.cmd, 3, 1, 0, 0);
             }
             XMStoreFloat4x4(&cb.mvp, XMMatrixTranspose(viewProj));
@@ -802,7 +823,7 @@ static void DrawMaskVk(const std::vector<DrawView>& dviews) {
             if (winVerts && shown) {
                 cb.col = keyed ? XMFLOAT4{ kKeyCol[g_keyMode][0], kKeyCol[g_keyMode][1], kKeyCol[g_keyMode][2], 1 }
                        : g_visualize ? XMFLOAT4{ 0, 1, 0, 0.5f } : XMFLOAT4{ 0, 0, 0, 0 };
-                VkBlend bl = cutBlend;
+                VkBlend bl = winBlend;
                 uint32_t offC = pushUbo(&cb, sizeof cb);
                 VkDeviceSize vo = offWin;
                 if (!BoxPass()) {   // flat windows only, fully see-through: cut their whole outline
@@ -826,6 +847,8 @@ static void DrawMaskVk(const std::vector<DrawView>& dviews) {
                         f.vkCmdDraw(s.cmd, winVerts, 1, 0, 0);
                     }
                     offB = offW = 0;
+                    // mix the key colour in by the gathered alpha (alpha = 1 after)
+                    if (keyPartial && use(VP_FULL, VB_DEST_ALPHA, offC)) f.vkCmdDraw(s.cmd, 3, 1, 0, 0);
                 }
             }
 
@@ -842,7 +865,12 @@ static void DrawMaskVk(const std::vector<DrawView>& dviews) {
                 VkBuffer vbs[2] = { g_vk.geo.buf, s.buf.buf };
                 VkDeviceSize vos[2] = { 0, 0 };
                 if (maskCount && shown) {
-                    VkBlend bl = cutBlend;
+                    if (handPartial && keyed) {   // alpha = 0, to gather the hands' see-through in
+                        CB c0 = cb;
+                        c0.col = { 0, 0, 0, 0 };
+                        if (use(VP_FULL, VB_ALPHA_ONLY, pushUbo(&c0, sizeof c0))) f.vkCmdDraw(s.cmd, 3, 1, 0, 0);
+                    }
+                    VkBlend bl = handBlend;
                     const ViewDepth& vd = pv.depth;
                     float range = vd.maxDepth - vd.minDepth;
                     bool occl = g_handOcclude && depth.view && fabsf(range) > 1e-6f;
@@ -868,6 +896,11 @@ static void DrawMaskVk(const std::vector<DrawView>& dviews) {
                         f.vkCmdDrawIndexed(s.cmd, g_sphereIndexCount, maskCount, 0, 0, 0);
                     }
                     offB = 0;
+                    if (handPartial && keyed) {   // mix the key colour in by the gathered alpha (alpha = 1 after)
+                        CB ck = cb;
+                        ck.col = { kKeyCol[g_keyMode][0], kKeyCol[g_keyMode][1], kKeyCol[g_keyMode][2], 1 };
+                        if (use(VP_FULL, VB_DEST_ALPHA, pushUbo(&ck, sizeof ck))) f.vkCmdDraw(s.cmd, 3, 1, 0, 0);
+                    }
                 }
                 if (uiCount && use(VP_ICON, VB_BLEND, offC)) {
                     VkBuffer ivbs[2] = { g_vk.geo.buf, s.buf.buf };

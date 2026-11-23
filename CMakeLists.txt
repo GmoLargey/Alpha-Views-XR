@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 # The version: package.ps1, the installer, README and the DLL all take it from here.
-project(AlphaViewsXR VERSION 1.6.1 LANGUAGES CXX)
+project(AlphaViewsXR VERSION 1.6.3 LANGUAGES CXX)
 if(WIN32)
     enable_language(RC)
 endif()

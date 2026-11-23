@@ -67,7 +67,7 @@ cbuffer B : register(b1) {
     float4 tanLRDU;        // tan of the eye's fov angles: left, right, down, up
     float4 depthMap;       // minDepth, 1 / (maxDepth - minDepth), 1 / nearZ, 1 / farZ
     float4 info;           // x = 1: game depth available, y = 1: some box has a face mode (shape.w),
-                           // z = 1: some window is only partly see-through (opts.x < 1)
+                           // z = 1: some window is only partly see-through (opts.x < 1), w = 1: key colour mode
     float4 boxCol;         // output colour (alpha 0 = passthrough, or a solid key colour)
 };
 #define MAX_WIN 32         // kMaxWindows in layer.cpp
@@ -273,8 +273,10 @@ float4 psBox(float4 p : SV_POSITION) : SV_TARGET {
     // Camera mode: the camera picture where the ray meets the window's plane (1 m away if it doesn't),
     // blended over the game by the see-through amount.
     if (camInfo.x > 0.5) return CamOut(camS > 0 ? v * camS : normalize(v), seeAmt);
-    // Partly see-through: alpha between the game's (1) and passthrough's (boxCol.a). A key colour has
-    // alpha 1 and see 1, so it's unchanged.
+    // Key colour mode, partly see-through windows: the see-through amount, gathered in alpha (layer.cpp
+    // then mixes the key colour in by it), so a streamer with a soft key shows the room partly.
+    if (info.w > 0.5) return float4(boxCol.rgb, seeAmt);
+    // Alpha mode, partly see-through: alpha between the game's (1) and passthrough's (boxCol.a).
     return float4(boxCol.rgb, lerp(1, boxCol.a, seeAmt));
 }
 

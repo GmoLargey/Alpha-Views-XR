@@ -706,7 +706,8 @@ enum GrabMode { GRAB_NONE, GRAB_MOVE, GRAB_CORNER, GRAB_RADIUS, GRAB_DEPTH,
                 GRAB_ALL,        // the guide's "move all windows" button: all windows move together
                 GRAB_PRESET,     // a guide preset button (corner = preset 0..2): tap loads, hold saves
                 GRAB_FACESBTN,   // box faces button, past the keep button (boxes only): next face mode
-                GRAB_SEE };      // see-through slider knob, left of the window (alpha mode): how much room shows
+                GRAB_SEE,        // see-through slider knob, left of the window (alpha mode): how much room shows
+                GRAB_HANDSEE };  // the guide's hands see-through slider (1.6.3): how much room the hand cutouts show
 
 // What a ray (eye gaze or controller laser) is on: a dot of the selected window, or a window.
 struct GazeTarget { GrabMode mode = GRAB_NONE; int win = -1, corner = -1; };
@@ -869,9 +870,13 @@ static bool CutoutsShown();
 static const int kGuideW = 2300, kGuideH = 1340;
 static const float kGuideHalfW = 0.4100f, kGuideHalfH = 0.2389f;   // same aspect as the image
 static const int kGuideHeader = 110;                              // title bar height (pixels)
-static const RECT kMoveAllBtn = { 560, 12, 1160, 98 };            // "move all windows" button (pixels)
+static const RECT kMoveAllBtn = { 290, 12, 890, 98 };             // "move all windows" button (pixels)
 // Preset buttons 1-3 beside it: tap to load that saved layout, hold to save the current one there.
-static RECT PresetBtn(int i) { return { 1196 + i * 152, 12, 1196 + i * 152 + 140, 98 }; }
+static RECT PresetBtn(int i) { return { 926 + i * 152, 12, 926 + i * 152 + 140, 98 }; }
+// Hands see-through slider (1.6.3) beside them: its box, and its track's ends (pixels).
+static const RECT kHandSeeBtn = { 1418, 12, 1900, 98 };
+static const int kHandSeeTrackL = 1448, kHandSeeTrackR = 1870, kHandSeeTrackY = 74;
+static int g_handSeeHover = 0;               // hands slider: 0 idle, 1 pointed at, 2 held
 static const double kPresetHoldSave = 1.5;   // seconds held to save
 static bool g_presetHas[3] = {};             // preset file exists for this game
 static int g_presetHover = -1;               // preset button pointed at (-1 none)
@@ -966,6 +971,14 @@ static ID3D11Buffer* g_sphereIB = nullptr;
 static ID3D11Buffer* g_instVB = nullptr;
 static ID3D11BlendState* g_bsAlphaOnly = nullptr;
 static ID3D11BlendState* g_bsAll = nullptr;
+// Key colour mode, partly see-through windows (1.6.2): each pixel's see-through amount is gathered in
+// alpha with MAX (the same pixel drawn twice, by overlapping windows or a box's front and back faces,
+// stays the same), then one fullscreen pass mixes in the key colour by that alpha.
+static ID3D11BlendState* g_bsAlphaMax = nullptr;
+static ID3D11BlendState* g_bsDestAlpha = nullptr;
+// Alpha mode, hands partly see-through (1.6.3): alpha = min(alpha, 1 - see), so a hand never shows less
+// room than a window behind it, and overlapping hand spheres don't add up.
+static ID3D11BlendState* g_bsAlphaMin = nullptr;
 static ID3D11RasterizerState* g_rs = nullptr;
 static ID3D11DepthStencilState* g_dss = nullptr;
 // Camera mode: cbuffer K and the camera picture.
@@ -1012,6 +1025,7 @@ static void ReleaseD3D() {
     if (g_on12 && g_ctx) { g_ctx->ClearState(); g_ctx->Flush(); } // our own context, not the game's
     SafeRelease(g_on12);
     SafeRelease(g_dss); SafeRelease(g_rs); SafeRelease(g_bsAll); SafeRelease(g_bsAlphaOnly);
+    SafeRelease(g_bsAlphaMax); SafeRelease(g_bsDestAlpha); SafeRelease(g_bsAlphaMin);
     SafeRelease(g_instVB); SafeRelease(g_sphereIB); SafeRelease(g_sphereVB); SafeRelease(g_winVB); SafeRelease(g_cb);
     SafeRelease(g_cbBox); SafeRelease(g_cbWin);
     SafeRelease(g_cbCam); SafeRelease(g_camSrv); SafeRelease(g_camTex); g_camTexW = g_camTexH = g_camTexSeq = 0;
@@ -1036,6 +1050,9 @@ static std::string ConfigPath() {
 }
 // Hands behind game objects (Ctrl+Alt+O): game surfaces closer than your hand cover it.
 static bool g_handOcclude = true;   // on by default
+// Hand cutouts' see-through (1.6.3): 1 = all room (the default) .. 0 = all game. Alpha and key colour
+// modes; the guide panel's hands slider sets it. Saved in settings.cfg.
+static float g_handSee = 1.0f;
 static int g_handDepthUsed = -1;   // last frame: 1 = hands tested against game depth, 0 = no depth to test, -1 = off
 
 static void LoadSettings() {
@@ -1053,13 +1070,15 @@ static void LoadSettings() {
     if (fscanf(f, "%d", &guide) == 1) g_guideOn = guide != 0;
     int occ;
     if (fscanf(f, "%d", &occ) == 1) g_handOcclude = occ != 0;
+    float hs;
+    if (fscanf(f, "%f", &hs) == 1 && std::isfinite(hs)) g_handSee = std::clamp(hs, 0.0f, 1.0f);
     fclose(f);
 }
 static void SaveSettings() {
     FILE* f = fopen((g_dir + PATH_SEP "settings.cfg").c_str(), "w");
     if (!f) return;
-    fprintf(f, "%f %d %d %d %d %d\n", g_handScale, g_handsEnabled ? 1 : 0, g_d3d12Enabled ? 1 : 0, g_forceAlpha ? 1 : 0,
-            g_guideOn ? 1 : 0, g_handOcclude ? 1 : 0);
+    fprintf(f, "%f %d %d %d %d %d %.2f\n", g_handScale, g_handsEnabled ? 1 : 0, g_d3d12Enabled ? 1 : 0, g_forceAlpha ? 1 : 0,
+            g_guideOn ? 1 : 0, g_handOcclude ? 1 : 0, g_handSee);
     fclose(f);
 }
 // Is Virtual Desktop's streamer running? Then SteamVR's frames reach the Quest through VD too.
@@ -1113,10 +1132,15 @@ static bool OpaqueCutouts() { return UseKeyColour() || UseCamera(); }
 static bool CutoutsShown() { return OpaqueCutouts() || g_alphaSupported || g_forceAlpha; }
 // The mode after m: alpha -> green -> blue -> pink -> camera (only with a headset camera) -> alpha.
 static int NextKeyMode(int m) { int n = (m + 1) % kKeyModes; return n == KEY_CAMERA && !g_camAvailable ? 0 : n; }
-// The see-through slider works in alpha and camera modes (a key colour mixed with the game no longer keys).
-static bool SeeWorks() { return !UseKeyColour() && CutoutsShown(); }
-// A window's see-through amount as drawn: always all in key colour mode.
+// The see-through slider works in every mode that shows the room. Key colour mode (1.6.2): the key colour
+// is mixed over the game by the see-through amount, for streamers whose key has a soft falloff (Steam
+// Link's Key Threshold gives partial transparency to colours near the key colour).
+static bool SeeWorks() { return CutoutsShown(); }
 static float SeeOf(const Window& w) { return SeeWorks() ? w.see : 1.0f; }
+// The hands slider works in alpha and key colour modes (camera mode: the hand spheres overlap, and
+// blending the camera picture over itself would show them patchily).
+static bool HandSeeWorks() { return CutoutsShown() && !UseCamera(); }
+static float HandSeeOf() { return HandSeeWorks() ? g_handSee : 1.0f; }
 
 // Reads a windows file (the game's own, or a preset) into g_windows. False if there's no file.
 static bool ReadWindows(const std::string& path, bool* enabled) {
@@ -1256,7 +1280,7 @@ struct CB { XMFLOAT4X4 mvp; XMFLOAT4 col, camR, camU; };   // must match cbuffer
 // Must match cbuffer B in shaders.hlsl.
 struct CBBox {
     XMFLOAT4 rectC, rectD, tanLRDU, depthMap;
-    XMFLOAT4 info;                     // x = 1: game depth available, y = 1: some box has a face mode, z = 1: some window partly see-through
+    XMFLOAT4 info;                     // x = 1: game depth available, y = 1: some box has a face mode, z = 1: some window partly see-through, w = 1: key colour mode
     XMFLOAT4 col;
 };
 // Must match cbuffer W in shaders.hlsl (MAX_WIN = kMaxWindows): every window, for psBox.
@@ -1402,6 +1426,23 @@ static bool InitD3D(ID3D11Device* device) {
         t.SrcBlendAlpha = D3D11_BLEND_ONE; t.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA; t.BlendOpAlpha = D3D11_BLEND_OP_ADD;
         t.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
         g_dev->CreateBlendState(&bb, &g_bsBlend);
+    }
+    {   // Key colour, partly see-through: alpha = max(alpha, see); then colour = key * alpha + game * (1 - alpha), alpha = 1.
+        D3D11_BLEND_DESC bb{};
+        auto& t = bb.RenderTarget[0];
+        t.BlendEnable = TRUE;
+        t.SrcBlend = D3D11_BLEND_ONE; t.DestBlend = D3D11_BLEND_ZERO; t.BlendOp = D3D11_BLEND_OP_ADD;
+        t.SrcBlendAlpha = D3D11_BLEND_ONE; t.DestBlendAlpha = D3D11_BLEND_ONE; t.BlendOpAlpha = D3D11_BLEND_OP_MAX;
+        t.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALPHA;
+        g_dev->CreateBlendState(&bb, &g_bsAlphaMax);
+        t.SrcBlend = D3D11_BLEND_DEST_ALPHA; t.DestBlend = D3D11_BLEND_INV_DEST_ALPHA;
+        t.SrcBlendAlpha = D3D11_BLEND_ONE; t.DestBlendAlpha = D3D11_BLEND_ZERO; t.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        t.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        g_dev->CreateBlendState(&bb, &g_bsDestAlpha);
+        t.SrcBlend = D3D11_BLEND_ONE; t.DestBlend = D3D11_BLEND_ZERO;
+        t.SrcBlendAlpha = D3D11_BLEND_ONE; t.DestBlendAlpha = D3D11_BLEND_ONE; t.BlendOpAlpha = D3D11_BLEND_OP_MIN;
+        t.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALPHA;
+        g_dev->CreateBlendState(&bb, &g_bsAlphaMin);
     }
 
     D3D11_RASTERIZER_DESC rsd{};
@@ -1724,6 +1765,7 @@ static GrabMode GuideButtonAt(float x, float y, int* idx) {
     float px = (x / kGuideHalfW + 1) * 0.5f * kGuideW, py = (1 - y / kGuideHalfH) * 0.5f * kGuideH;
     if (py < kMoveAllBtn.top - 12 || py > kMoveAllBtn.bottom + 16) return GRAB_GUIDE;
     if (px > kMoveAllBtn.left - 20 && px < kMoveAllBtn.right + 14) return GRAB_ALL;
+    if (px > kHandSeeBtn.left - 6 && px < kHandSeeBtn.right + 10) return HandSeeWorks() ? GRAB_HANDSEE : GRAB_GUIDE;
     for (int i = 0; i < 3; ++i) {
         RECT b = PresetBtn(i);
         if (px > b.left - 6 && px < b.right + 6) { if (idx) *idx = i; return GRAB_PRESET; }
@@ -1868,6 +1910,7 @@ static const char* GrabName(GrabMode m) {
     case GRAB_KEEPBTN: return "keep-box button"; case GRAB_CIRCLEBTN: return "circle button";
     case GRAB_LOCKBTN: return "lock button"; case GRAB_SNAPBTN: return "snap button"; case GRAB_FACESBTN: return "box faces button"; case GRAB_SEE: return "see-through slider";
     case GRAB_GUIDE: return "guide panel"; case GRAB_ALL: return "all windows"; case GRAB_PRESET: return "preset button";
+    case GRAB_HANDSEE: return "hands see-through slider";
     default: return "none";
     }
 }
@@ -1971,8 +2014,33 @@ static void SnapshotAll() {
     g_allStart.clear();
     for (auto& w : g_windows) g_allStart.push_back({ w.pos, w.rot });
 }
+// Hands slider: the value at a point on the panel (its x), snapped to 5 %.
+static float HandSeeAt(float x) {
+    float px = (x / kGuideHalfW + 1) * 0.5f * kGuideW;
+    float v = std::clamp((px - kHandSeeTrackL) / float(kHandSeeTrackR - kHandSeeTrackL), 0.0f, 1.0f);
+    return roundf(v * 20) / 20;
+}
+static float g_handSeeGrabX = 0;   // hands slider held by eye + pinch: the panel x it started from
+// Where the hand holding the hands slider points on the panel (x, metres): the laser's spot, the hand
+// itself, or (eyes + pinch) where it started plus the hand's sideways motion.
+static float HandSeePointX(const HandState& h) {
+    float t; XMFLOAT3 l;
+    if (h.laser && GuideRay(V(h.aimO), V(h.aimD), t, l)) return l.x;
+    if (!h.indirect) return GuideLocal(V(h.pinchPt)).x;
+    return g_handSeeGrabX + XMVectorGetX(XMVector3Dot(V(h.pinchPt) - V(h.pinchStartPt), V(g_guideRight))) * 2.0f;
+}
 static void BeginGuideGrab(HandState& h, GrabMode gm, bool indirect, bool laser, int idx = -1) {
     for (auto& o : g_hand) if (&o != &h && o.mode == gm) return;   // one hand at a time
+    if (gm == GRAB_HANDSEE) {
+        h.mode = gm; h.win = -1; h.corner = -1; h.indirect = indirect; h.laser = laser;
+        float t; XMFLOAT3 l;
+        if (laser && GuideRay(V(h.aimO), V(h.aimD), t, l)) g_handSeeGrabX = l.x;
+        else if (!indirect) g_handSeeGrabX = GuideLocal(V(h.pinchPt)).x;
+        else if (g_gazeValid && GuideRay(V(g_gazeOrigin), V(g_gazeDir), t, l)) g_handSeeGrabX = l.x;
+        else g_handSeeGrabX = ((kHandSeeTrackL + g_handSee * (kHandSeeTrackR - kHandSeeTrackL)) / kGuideW * 2 - 1) * kGuideHalfW;
+        g_handSee = HandSeeAt(g_handSeeGrabX);   // a tap sets it where you point
+        return;
+    }
     if (gm == GRAB_PRESET) {
         if (idx < 0 || idx > 2) return;
         // Tap: load it. Hold: save the current windows there (UpdateGuideGrab).
@@ -2003,6 +2071,7 @@ static void BeginGuideGrab(HandState& h, GrabMode gm, bool indirect, bool laser,
     }
 }
 static void UpdateGuideGrab(HandState& h) {
+    if (h.mode == GRAB_HANDSEE) { g_handSee = HandSeeAt(HandSeePointX(h)); return; }
     if (h.mode == GRAB_PRESET) {
         if (!g_presetHoldSaved && Now() - g_presetHoldStart >= kPresetHoldSave) {
             g_presetHoldSaved = true;
@@ -2050,6 +2119,7 @@ static void UpdateGuideGrab(HandState& h) {
 }
 static void EndGuideGrab(HandState& h) {
     if (h.mode == GRAB_ALL) { Log("All windows moved\n"); SaveWindows(); }
+    if (h.mode == GRAB_HANDSEE) { Log("Hand cutouts show %.0f%% room\n", g_handSee * 100); SaveSettings(); }
     if (h.mode == GRAB_PRESET) {
         if (!g_presetHoldSaved && h.corner >= 0 && h.corner < 3) LoadPreset(h.corner, "tapped its button");
         g_presetHeld = -1;
@@ -2123,7 +2193,7 @@ static void BeginGrab(HandState& h) {
     // 1b. Hand (or controller tip) on the guide panel: move it, or its "move all windows" button.
     if (h.mode == GRAB_NONE) { int pi = -1; if (GrabMode gm = GuideTouch(p, &pi); gm != GRAB_NONE) { BeginGuideGrab(h, gm, false, false, pi); return; } }
     // 2. Eyes (or the controller's laser): whatever you're looking or pointing at.
-    if (h.mode == GRAB_NONE && (gt.mode == GRAB_GUIDE || gt.mode == GRAB_ALL || gt.mode == GRAB_PRESET)) { BeginGuideGrab(h, gt.mode, true, useLaser, gt.corner); return; }
+    if (h.mode == GRAB_NONE && (gt.mode == GRAB_GUIDE || gt.mode == GRAB_ALL || gt.mode == GRAB_PRESET || gt.mode == GRAB_HANDSEE)) { BeginGuideGrab(h, gt.mode, true, useLaser, gt.corner); return; }
     if (h.mode == GRAB_NONE && gt.mode != GRAB_NONE && gt.win >= 0 && gt.win < (int)g_windows.size()) {
         const Window& w = g_windows[gt.win];
         h.mode = gt.mode; h.win = gt.win; h.corner = gt.corner;
@@ -2221,7 +2291,7 @@ static void FinishTrace(HandState& h, Window& w) {
 }
 
 static void UpdateGrab(HandState& h) {
-    if (h.mode == GRAB_GUIDE || h.mode == GRAB_ALL || h.mode == GRAB_PRESET) { UpdateGuideGrab(h); return; }
+    if (h.mode == GRAB_GUIDE || h.mode == GRAB_ALL || h.mode == GRAB_PRESET || h.mode == GRAB_HANDSEE) { UpdateGuideGrab(h); return; }
     if (h.win < 0 || h.win >= (int)g_windows.size()) { h.mode = GRAB_NONE; return; }
     Window& w = g_windows[h.win];
     // Laser on the depth dot: no dragging (it's hard to aim along the depth line). The
@@ -2357,7 +2427,7 @@ static void UpdateGrab(HandState& h) {
 }
 
 static void EndGrab(HandState& h, double now) {
-    if (h.mode == GRAB_GUIDE || h.mode == GRAB_ALL || h.mode == GRAB_PRESET) { EndGuideGrab(h); return; }
+    if (h.mode == GRAB_GUIDE || h.mode == GRAB_ALL || h.mode == GRAB_PRESET || h.mode == GRAB_HANDSEE) { EndGuideGrab(h); return; }
     if (h.win >= 0 && h.win < (int)g_windows.size()) {
         Window& w = g_windows[h.win];
         bool tap = (now - h.pinchStart) < 0.35 && !h.dragging && Dist(V(h.pinchPt), V(h.pinchStartPt)) < 0.012f;
@@ -2488,7 +2558,7 @@ static void GuideContent(GuideData& g) {
         else if (w.ellipse) t += L", circle";
         g.win.push_back({ 0, L"Type: " + t });
         if (w.hd > 0) g.win.push_back({ 0, std::wstring(L"Box faces: ") + kBoxModeNameW[std::clamp(w.boxMode, 0, 3)] });
-        if (w.see < 1) g.win.push_back({ 0, Fmt(L"See-through: %.0f%% room%ls", w.see * 100, SeeWorks() ? L"" : L" (alpha mode only)") });
+        if (w.see < 1) g.win.push_back({ 0, Fmt(L"See-through: %.0f%% room%ls", w.see * 100, SeeWorks() ? L"" : L" (no passthrough)") });
         g.win.push_back({ 0, L"Distance: " + ShortDist(Dist(g_head, V(w.pos))) });
     } else if (g_windows.empty()) {
         g.win.push_back({ 2, L"No windows yet" });
@@ -2575,6 +2645,7 @@ static void RenderGuide() {
     for (auto* ns : { &g.win, &g.depth, &g.status }) for (auto& n : *ns) { key += n.text; key += L'\n'; }
     key += Fmt(L"%d %d %d %d %d %d %d%d%d", g_guideBtnState, g_presetHover, g_presetHeld, g_presetStep, g_presetFlash,
                g_presetFlashSaved ? 1 : 0, g_presetHas[0] ? 1 : 0, g_presetHas[1] ? 1 : 0, g_presetHas[2] ? 1 : 0);
+    key += Fmt(L" %d %d %d", g_handSeeHover, (int)lroundf(g_handSee * 20), HandSeeWorks() ? 1 : 0);
     if (key == g_guideText && !g_guidePixels.empty()) return;
     g_guideText = key;
 
@@ -2657,7 +2728,28 @@ static void RenderGuide() {
     fill({ 0, 0, kGuideW, kGuideH }, RGB(22, 25, 31));
     fill({ 0, 0, kGuideW, kGuideHeader }, RGB(30, 70, 60));
     text(L"EDIT MODE", fTitle, RGB(235, 255, 245), { 40, 0, kGuideW - 40, kGuideHeader }, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-    text(keyboard ? L"Grab the panel to move it  ·  Ctrl+Alt+G hides it" : L"Grab the panel to move it", fHow, RGB(170, 210, 195), { 40, 0, kGuideW - 40, kGuideHeader }, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    text(L"Grab the panel to move it", fHow, RGB(170, 210, 195), { 1920, keyboard ? 18 : 0, kGuideW - 40, keyboard ? 54 : kGuideHeader }, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    if (keyboard) text(L"Ctrl+Alt+G hides it", fHow, RGB(170, 210, 195), { 1920, 56, kGuideW - 40, 92 }, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    // Hands see-through slider: how much room the hand cutouts show. Point, then slide (pinch / trigger held).
+    {
+        const bool on = HandSeeWorks();
+        RECT b = kHandSeeBtn;
+        const COLORREF edge = g_handSeeHover ? RGB(150, 210, 255) : RGB(80, 100, 130);
+        const COLORREF bg = !on ? RGB(34, 40, 50) : g_handSeeHover == 2 ? RGB(50, 90, 140) : g_handSeeHover ? RGB(60, 84, 116) : RGB(42, 58, 82);
+        shape(b, 30, edge);
+        shape({ b.left + 3, b.top + 3, b.right - 3, b.bottom - 3 }, 26, bg);
+        std::wstring label = !on ? std::wstring(L"Hands: camera mode, always all room")
+                           : Fmt(L"Hands: %.0f%% room", g_handSee * 100) + (g_handsEnabled ? L"" : L"  (hands off)");
+        text(label, fKey, on ? RGB(245, 250, 255) : cDim, { b.left + 22, b.top + 4, b.right - 16, b.top + 46 }, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        if (on) {
+            const int y = kHandSeeTrackY, kx = kHandSeeTrackL + (int)lroundf(g_handSee * (kHandSeeTrackR - kHandSeeTrackL));
+            shape({ kHandSeeTrackL, y - 4, kHandSeeTrackR, y + 4 }, 8, RGB(90, 100, 118));
+            if (kx > kHandSeeTrackL + 2) shape({ kHandSeeTrackL, y - 4, kx, y + 4 }, 8, RGB(225, 232, 240));
+            const int kr = g_handSeeHover ? 14 : 12;
+            shape({ kx - kr - 2, y - kr - 2, kx + kr + 2, y + kr + 2 }, -1, RGB(30, 36, 46));
+            shape({ kx - kr, y - kr, kx + kr, y + kr }, -1, g_handSeeHover == 2 ? RGB(255, 230, 60) : RGB(235, 240, 248));
+        }
+    }
     // "Move all windows" button: hold it (pinch, trigger) and move your hand; every window follows.
     {
         const COLORREF bg = g_guideBtnState == 2 ? RGB(40, 150, 255) : g_guideBtnState == 1 ? RGB(60, 110, 170) : RGB(42, 58, 82);
@@ -2853,13 +2945,15 @@ static void UpdateGuide(XrSpace space, XMVECTOR head, double dt, double now) {
     }
 
     // Panel buttons: held, pointed at (eyes, laser or a hand on it), or idle.
-    int btn = 0, pHover = -1, pHeld = -1;
+    int btn = 0, pHover = -1, pHeld = -1, hs = 0;
     for (auto& h : g_hand) {
         if (h.mode == GRAB_ALL) btn = 2;
         if (h.mode == GRAB_PRESET) pHeld = h.corner;
+        if (h.mode == GRAB_HANDSEE) hs = 2;
     }
     auto pointed = [&](GrabMode m, int k) {
         if (m == GRAB_ALL && btn == 0) btn = 1;
+        if (m == GRAB_HANDSEE && hs == 0) hs = 1;
         if (m == GRAB_PRESET && pHover < 0) pHover = k;
     };
     pointed(g_gazeTarget.mode, g_gazeTarget.corner);
@@ -2872,11 +2966,12 @@ static void UpdateGuide(XrSpace space, XMVECTOR head, double dt, double now) {
     // Holding a preset: progress towards saving, in steps (each step redraws the panel).
     int step = pHeld >= 0 ? (g_presetHoldSaved ? 10 : std::min(9, (int)((now - g_presetHoldStart) / kPresetHoldSave * 10))) : 0;
     if (g_presetFlash >= 0 && now > g_presetFlashUntil) g_presetFlash = -1;
-    int state = btn | (pHover + 1) << 2 | (pHeld + 1) << 4 | step << 6 | (g_presetFlash + 1) << 10 | (g_presetFlashSaved ? 1 << 12 : 0);
+    int state = btn | (pHover + 1) << 2 | (pHeld + 1) << 4 | step << 6 | (g_presetFlash + 1) << 10 | (g_presetFlashSaved ? 1 << 12 : 0) |
+                hs << 13 | (int)lroundf(g_handSee * 20) << 15 | (HandSeeWorks() ? 1 << 20 : 0);
     static int lastState = -1;
     bool changed = state != lastState;
     lastState = state;
-    g_guideBtnState = btn; g_presetHover = pHover; g_presetHeld = pHeld; g_presetStep = step;
+    g_guideBtnState = btn; g_presetHover = pHover; g_presetHeld = pHeld; g_presetStep = step; g_handSeeHover = hs;
     if (changed || now >= g_guideNextText) { g_guideNextText = now + 0.25; RenderGuide(); }
 }
 
@@ -3211,7 +3306,7 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
             if (sx != 0 && !locked) h.turn -= sx * 1.5f * float(dt);
         }
         // Thumbstick up / down: selected window deeper / shallower.
-        else if (h.mode != GRAB_GUIDE && h.mode != GRAB_ALL && h.mode != GRAB_PRESET && fabsf(h.stickY) > 0.3f && g_selected >= 0 && g_selected < (int)g_windows.size()) {
+        else if (h.mode != GRAB_GUIDE && h.mode != GRAB_ALL && h.mode != GRAB_PRESET && h.mode != GRAB_HANDSEE && fabsf(h.stickY) > 0.3f && g_selected >= 0 && g_selected < (int)g_windows.size()) {
             Window& w = g_windows[g_selected];
             float s = (fabsf(h.stickY) - 0.3f) / 0.7f * (h.stickY > 0 ? 1.0f : -1.0f);
             // Up to 30 cm/s total depth, faster as the box gets bigger (so a deep box doesn't take ages).
@@ -3670,9 +3765,12 @@ static void UpdateFrame(XrSpace space, XrTime time, XMVECTOR head) {
             { XR_HAND_JOINT_THUMB_PROXIMAL_EXT, XR_HAND_JOINT_INDEX_PROXIMAL_EXT },
         };
         float col[4] = { 0, 0, 0, 0 };
-        if (UseKeyColour()) { col[0] = kKeyCol[g_keyMode][0]; col[1] = kKeyCol[g_keyMode][1]; col[2] = kKeyCol[g_keyMode][2]; col[3] = 1; }
+        // (Hands slider: key colour = alpha holds the see-through, gathered then mixed like windows; alpha
+        // mode = alpha 1 - see, kept only where it shows more room than what's there: see HandPartial.)
+        if (UseKeyColour()) { col[0] = kKeyCol[g_keyMode][0]; col[1] = kKeyCol[g_keyMode][1]; col[2] = kKeyCol[g_keyMode][2]; col[3] = HandSeeOf(); }
         else if (UseCamera()) { col[0] = col[1] = col[2] = col[3] = 1; }   // (painted with the camera's picture)
         else if (g_visualize) { col[1] = 1; col[2] = 1; col[3] = 0.5f; }
+        else col[3] = 1 - HandSeeOf();
         for (auto& h : g_hand) {
             if (!h.active || h.isCtl) continue;   // controllers have no joints
             static bool loggedRadii = false;
@@ -3845,7 +3943,7 @@ static bool FillBoxCB(const DrawView& pv, XMMATRIX cam, bool haveDepth, const XM
             q[0] = w.pts[k].x; q[1] = w.pts[k].y;
         }
     }
-    bb.info = { haveDepth ? 1.0f : 0.0f, anyFaces ? 1.0f : 0.0f, anyPartial ? 1.0f : 0.0f, 0 };
+    bb.info = { haveDepth ? 1.0f : 0.0f, anyFaces ? 1.0f : 0.0f, anyPartial ? 1.0f : 0.0f, UseKeyColour() ? 1.0f : 0.0f };
     return haveDepth;
 }
 
@@ -4015,7 +4113,15 @@ static void DrawMaskD3D(const std::vector<DrawView>& dviews) {
         g_ctx->PSSetShaderResources(2, 1, &cs);
     }
     // Cutouts' blend: camera = blended by alpha, key colour (or visualizing) = solid, alpha = alpha only.
+    // Key colour with partly see-through windows: gathered in alpha, then mixed (see g_bsAlphaMax).
+    const bool keyPartial = keyed && AnyPartialWindow() && g_bsAlphaMax && g_bsDestAlpha;
     ID3D11BlendState* cutBlend = camera ? g_bsBlend : (keyed || g_visualize ? g_bsAll : g_bsAlphaOnly);
+    ID3D11BlendState* winBlend = keyPartial ? g_bsAlphaMax : cutBlend;   // windows (hands use cutBlend)
+    // Hands partly see-through (1.6.3). Key colour: alpha cleared, the hands gathered into it with MAX,
+    // then the key colour mixed in by it (after the windows and guide, so a hand over a partly
+    // see-through window adds to it). Alpha mode: MIN (g_bsAlphaMin).
+    const bool handPartial = HandSeeOf() < 1 && !g_visualize && (keyed || !opaque) && g_bsAlphaMax && g_bsDestAlpha && g_bsAlphaMin;
+    ID3D11BlendState* handBlend = !handPartial ? cutBlend : keyed ? g_bsAlphaMax : g_bsAlphaMin;
 
     for (const DrawView& pv : dviews) {
         auto it = g_swapchains.find(pv.swapchain);
@@ -4053,10 +4159,11 @@ static void DrawMaskD3D(const std::vector<DrawView>& dviews) {
             g_ctx->UpdateSubresource(g_cbCam, 0, nullptr, &k, 0, 0);
         }
         // 1. Alpha mode: force alpha = 1 everywhere (games often leave junk in alpha).
-        //    Key colour and camera modes keep the game's alpha (the layer isn't alpha blended then).
-        if (!opaque) {
+        //    Key colour and camera modes keep the game's alpha (the layer isn't alpha blended then), except
+        //    key colour with partly see-through windows: alpha = 0, to gather the see-through amounts in.
+        if (!opaque || keyPartial) {
             XMStoreFloat4x4(&cb.mvp, XMMatrixIdentity());
-            cb.col = { 0, 0, 0, 1 };
+            cb.col = { 0, 0, 0, keyPartial ? 0.0f : 1.0f };
             g_ctx->UpdateSubresource(g_cb, 0, nullptr, &cb, 0, 0);
             g_ctx->OMSetBlendState(g_bsAlphaOnly, nullptr, 0xffffffff);
             g_ctx->VSSetShader(g_vsFull, nullptr, 0);
@@ -4072,7 +4179,7 @@ static void DrawMaskD3D(const std::vector<DrawView>& dviews) {
             cb.col = keyed ? XMFLOAT4{ kKeyCol[g_keyMode][0], kKeyCol[g_keyMode][1], kKeyCol[g_keyMode][2], 1 }
                    : g_visualize ? XMFLOAT4{ 0, 1, 0, 0.5f } : XMFLOAT4{ 0, 0, 0, 0 };
             g_ctx->UpdateSubresource(g_cb, 0, nullptr, &cb, 0, 0);
-            g_ctx->OMSetBlendState(cutBlend, nullptr, 0xffffffff);
+            g_ctx->OMSetBlendState(winBlend, nullptr, 0xffffffff);
             UINT stride = sizeof(XMFLOAT3), off = 0;
             g_ctx->IASetInputLayout(g_ilMesh);
             g_ctx->IASetVertexBuffers(0, 1, &g_winVB, &stride, &off);
@@ -4104,6 +4211,13 @@ static void DrawMaskD3D(const std::vector<DrawView>& dviews) {
                 g_ctx->Draw(winVerts, 0);
                 ID3D11ShaderResourceView* none = nullptr;
                 g_ctx->PSSetShaderResources(0, 1, &none);
+                if (keyPartial) {   // mix the key colour in by the gathered alpha (alpha = 1 after)
+                    g_ctx->UpdateSubresource(g_cb, 0, nullptr, &cb, 0, 0);
+                    g_ctx->OMSetBlendState(g_bsDestAlpha, nullptr, 0xffffffff);
+                    g_ctx->VSSetShader(g_vsFull, nullptr, 0);
+                    g_ctx->PSSetShader(g_psConst, nullptr, 0);
+                    g_ctx->Draw(3, 0);
+                }
             }
         }
 
@@ -4141,7 +4255,19 @@ static void DrawMaskD3D(const std::vector<DrawView>& dviews) {
             g_ctx->VSSetShader(g_vsSphere, nullptr, 0);
             g_ctx->PSSetShader(g_psColor, nullptr, 0);
             if (maskCount && shown) {
-                g_ctx->OMSetBlendState(cutBlend, nullptr, 0xffffffff);
+                if (handPartial && keyed) {   // alpha = 0, to gather the hands' see-through in
+                    CB c0 = cb;
+                    c0.col = { 0, 0, 0, 0 };
+                    g_ctx->UpdateSubresource(g_cb, 0, nullptr, &c0, 0, 0);
+                    g_ctx->OMSetBlendState(g_bsAlphaOnly, nullptr, 0xffffffff);
+                    g_ctx->VSSetShader(g_vsFull, nullptr, 0);
+                    g_ctx->PSSetShader(g_psConst, nullptr, 0);
+                    g_ctx->Draw(3, 0);
+                    g_ctx->UpdateSubresource(g_cb, 0, nullptr, &cb, 0, 0);
+                    g_ctx->VSSetShader(g_vsSphere, nullptr, 0);
+                    g_ctx->PSSetShader(g_psColor, nullptr, 0);
+                }
+                g_ctx->OMSetBlendState(handBlend, nullptr, 0xffffffff);
                 // Hands behind game objects: test each pixel against the game's depth.
                 ID3D11ShaderResourceView* hdepth = (g_handOcclude && g_vsSphereD && g_psHandD) ? ViewDepthSRV() : nullptr;
                 const ViewDepth& vd = pv.depth;
@@ -4169,6 +4295,18 @@ static void DrawMaskD3D(const std::vector<DrawView>& dviews) {
                     if (g_handOcclude && g_handDepthUsed != 0) Log("Hands behind game objects: no game depth in this view, hands drawn in front.\n");
                     g_handDepthUsed = g_handOcclude ? 0 : -1;
                     g_ctx->DrawIndexedInstanced(g_sphereIndexCount, maskCount, 0, 0, 0);
+                }
+                if (handPartial && keyed) {   // mix the key colour in by the gathered alpha (alpha = 1 after)
+                    CB ck = cb;
+                    ck.col = { kKeyCol[g_keyMode][0], kKeyCol[g_keyMode][1], kKeyCol[g_keyMode][2], 1 };
+                    g_ctx->UpdateSubresource(g_cb, 0, nullptr, &ck, 0, 0);
+                    g_ctx->OMSetBlendState(g_bsDestAlpha, nullptr, 0xffffffff);
+                    g_ctx->VSSetShader(g_vsFull, nullptr, 0);
+                    g_ctx->PSSetShader(g_psConst, nullptr, 0);
+                    g_ctx->Draw(3, 0);
+                    g_ctx->UpdateSubresource(g_cb, 0, nullptr, &cb, 0, 0);
+                    g_ctx->VSSetShader(g_vsSphere, nullptr, 0);
+                    g_ctx->PSSetShader(g_psColor, nullptr, 0);
                 }
             }
             if (uiCount && g_vsIcon && g_psIcon && g_ilIcon && g_quadVB && g_bsBlend) {
